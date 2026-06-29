@@ -24,6 +24,7 @@ import {
   Settings2,
   Sparkles,
   SquareTerminal,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import "./styles.css";
@@ -67,6 +68,7 @@ function App() {
   const [draftSession, setDraftSession] = useState(null);
   const [draggedProjectId, setDraggedProjectId] = useState(null);
   const [projectDragPreview, setProjectDragPreview] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
   const [view, setView] = useState("chat");
   const [model, setModel] = useState(MODELS[0].id);
   const [prompt, setPrompt] = useState("");
@@ -121,6 +123,23 @@ function App() {
       behavior: "smooth",
     });
   }, [messages, timeline.length]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    function closeContextMenu() {
+      setContextMenu(null);
+    }
+
+    window.addEventListener("click", closeContextMenu);
+    window.addEventListener("keydown", closeContextMenu);
+    window.addEventListener("scroll", closeContextMenu, true);
+    return () => {
+      window.removeEventListener("click", closeContextMenu);
+      window.removeEventListener("keydown", closeContextMenu);
+      window.removeEventListener("scroll", closeContextMenu, true);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     if (view !== "settings") return;
@@ -488,6 +507,75 @@ function App() {
     });
   }
 
+  function openProjectContextMenu(event, projectId) {
+    event.preventDefault();
+    setContextMenu({
+      type: "project",
+      projectId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function openSessionContextMenu(event, projectId, sessionId) {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      type: "session",
+      projectId,
+      sessionId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function removeProject(projectId) {
+    const nextProjects = projects.filter((project) => project.id !== projectId);
+    setProjects(nextProjects);
+    setContextMenu(null);
+
+    if (activeProjectId === projectId) {
+      const nextProject = nextProjects[0] ?? null;
+      setActiveProjectId(nextProject?.id ?? null);
+      setActiveSessionId(nextProject?.sessions[0]?.id ?? null);
+      setDraftSession(null);
+      if (!nextProject) setMessages([]);
+    }
+  }
+
+  function deleteProjectSessions(projectId) {
+    setProjects((items) =>
+      items.map((project) =>
+        project.id === projectId ? { ...project, sessions: [] } : project,
+      ),
+    );
+    setContextMenu(null);
+
+    if (activeProjectId === projectId) {
+      setActiveSessionId(null);
+      setDraftSession(null);
+      setMessages([]);
+    }
+  }
+
+  function deleteSession(projectId, sessionId) {
+    const project = projects.find((item) => item.id === projectId);
+    const remainingSessions = project?.sessions.filter((session) => session.id !== sessionId) ?? [];
+
+    setProjects((items) =>
+      items.map((item) =>
+        item.id === projectId ? { ...item, sessions: remainingSessions } : item,
+      ),
+    );
+    setContextMenu(null);
+
+    if (activeProjectId === projectId && activeSessionId === sessionId) {
+      setActiveSessionId(remainingSessions[0]?.id ?? null);
+      setDraftSession(null);
+      if (remainingSessions.length === 0) setMessages([]);
+    }
+  }
+
   async function saveSettings(event) {
     event.preventDefault();
     setSettingsStatus("saving");
@@ -536,6 +624,7 @@ function App() {
               key={project.id}
               data-project-id={project.id}
               onPointerDown={(event) => beginProjectDrag(event, project.id)}
+              onContextMenu={(event) => openProjectContextMenu(event, project.id)}
             >
               <div
                 className={`project-header ${activeProjectId === project.id ? "is-active" : ""}`}
@@ -577,6 +666,7 @@ function App() {
                   <button
                     key={session.id}
                     className={`session-item ${activeSessionId === session.id ? "is-selected" : ""}`}
+                    onContextMenu={(event) => openSessionContextMenu(event, project.id, session.id)}
                     onClick={() => {
                       setActiveProjectId(project.id);
                       setActiveSessionId(session.id);
@@ -622,6 +712,49 @@ function App() {
                 </div>
               ))}
             </div>
+          </div>
+        ) : null}
+
+        {contextMenu ? (
+          <div
+            className="context-menu"
+            role="menu"
+            style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            {contextMenu.type === "project" ? (
+              <>
+                <button
+                  className="context-menu-item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => removeProject(contextMenu.projectId)}
+                >
+                  <XCircle size={15} />
+                  <span>{"移除项目"}</span>
+                </button>
+                <button
+                  className="context-menu-item is-danger"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => deleteProjectSessions(contextMenu.projectId)}
+                >
+                  <Trash2 size={15} />
+                  <span>{"删除所有会话"}</span>
+                </button>
+              </>
+            ) : (
+              <button
+                className="context-menu-item is-danger"
+                type="button"
+                role="menuitem"
+                onClick={() => deleteSession(contextMenu.projectId, contextMenu.sessionId)}
+              >
+                <Trash2 size={15} />
+                <span>{"删除会话"}</span>
+              </button>
+            )}
           </div>
         ) : null}
 
