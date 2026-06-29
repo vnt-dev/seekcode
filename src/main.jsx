@@ -507,16 +507,6 @@ function App() {
     <div className={`app-shell ${view === "settings" ? "is-settings-view" : ""}`}>
       {view !== "settings" ? (
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">
-            <Sparkles size={18} />
-          </div>
-          <div>
-            <strong>SeekCode</strong>
-            <span>DeepSeek Agent IDE</span>
-          </div>
-        </div>
-
         <button className="new-chat-button" type="button" onClick={openDirectoryPicker}>
           <MessageSquarePlus size={17} />
           <span>新对话</span>
@@ -673,6 +663,17 @@ function App() {
                     <strong>调用失败</strong>
                     <span>{modelError}</span>
                   </div>
+                </div>
+              ) : null}
+
+              {isRunning && !modelError ? (
+                <div className="generating-card" role="status" aria-live="polite">
+                  <span>{"正在生成内容"}</span>
+                  <span className="generating-dots" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </span>
                 </div>
               ) : null}
 
