@@ -1,6 +1,7 @@
 //! Agent state machine, task context, and execution loop scaffolding.
 
 use futures_util::StreamExt;
+use parking_lot::RwLock;
 use seekcode_common::{
     ChatMessage, ChatRole, SeekCodeError, SeekCodeResult, TaskId, TokenUsage, ToolCallId,
     WorkspaceId,
@@ -9,9 +10,8 @@ use seekcode_model_provider::{ChatChunk, ChatRequest, ModelProvider, ToolCall};
 use seekcode_tool_system::{ToolContext, ToolOutput, ToolRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc};
-use parking_lot::RwLock;
-use tokio::sync::{broadcast};
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Agent runtime configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]

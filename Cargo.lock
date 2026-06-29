@@ -3512,6 +3512,7 @@ name = "seekcode-app-kernel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "parking_lot",
  "seekcode-agent-core",
  "seekcode-common",
  "seekcode-deepseek-client",

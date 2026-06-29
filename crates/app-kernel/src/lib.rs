@@ -1,5 +1,6 @@
 //! Application-level service composition for the Tauri adapter and future CLI.
 
+use parking_lot::RwLock;
 use seekcode_agent_core::{Agent, AgentConfig, AgentEvent, AgentTask, StartTaskRequest};
 use seekcode_common::{SeekCodeResult, TaskId};
 use seekcode_deepseek_client::{DeepSeekClient, DeepSeekConfig};
@@ -13,7 +14,7 @@ use seekcode_tool_system::ToolRegistry;
 use seekcode_workspace::{FileEntry, FileSnapshot, ListOptions, WorkspaceRoot, WorkspaceService};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub use seekcode_storage::SessionRecord as AppSessionRecord;
@@ -105,10 +106,7 @@ impl AppKernel {
 
     /// Returns the kernel configuration.
     pub fn config(&self) -> AppKernelConfig {
-        self.config
-            .read()
-            .expect("app kernel config lock is not poisoned")
-            .clone()
+        self.config.read().clone()
     }
 
     /// Returns assembled services.
@@ -120,16 +118,9 @@ impl AppKernel {
     pub async fn update_deepseek_config(&self, deepseek: DeepSeekConfig) -> anyhow::Result<()> {
         let provider: Arc<dyn ModelProvider> = Arc::new(DeepSeekClient::new(deepseek.clone())?);
         self.services.agent.set_provider(provider.clone());
-        *self
-            .services
-            .provider
-            .write()
-            .expect("model provider lock is not poisoned") = provider;
+        *self.services.provider.write() = provider;
 
-        self.config
-            .write()
-            .expect("app kernel config lock is not poisoned")
-            .deepseek = deepseek;
+        self.config.write().deepseek = deepseek;
 
         Ok(())
     }
