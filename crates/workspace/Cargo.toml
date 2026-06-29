@@ -1,0 +1,13 @@
+[package]
+name = "seekcode-workspace"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+globset.workspace = true
+ignore.workspace = true
+seekcode-common.workspace = true
+serde.workspace = true
+walkdir.workspace = true

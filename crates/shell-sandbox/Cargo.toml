@@ -1,0 +1,12 @@
+[package]
+name = "seekcode-shell-sandbox"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+seekcode-common.workspace = true
+serde.workspace = true
+tokio.workspace = true

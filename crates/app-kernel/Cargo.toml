@@ -1,0 +1,24 @@
+[package]
+name = "seekcode-app-kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+seekcode-agent-core.workspace = true
+seekcode-common.workspace = true
+seekcode-deepseek-client.workspace = true
+seekcode-model-provider.workspace = true
+seekcode-patch-engine.workspace = true
+seekcode-policy.workspace = true
+seekcode-secrets.workspace = true
+seekcode-shell-sandbox.workspace = true
+seekcode-storage.workspace = true
+seekcode-telemetry.workspace = true
+seekcode-tool-system.workspace = true
+seekcode-workspace.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
