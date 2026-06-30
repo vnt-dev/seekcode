@@ -28,6 +28,8 @@ pub struct ChatRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum ChatChunk {
+    /// One provider choice chunk containing one complete streaming delta.
+    Choice(ChatChoiceChunk),
     /// Assistant content delta.
     Content(String),
     /// Assistant reasoning delta.
@@ -38,6 +40,41 @@ pub enum ChatChunk {
     Usage(TokenUsage),
     /// Provider-specific completion marker.
     Finished,
+}
+
+/// One streaming choice emitted by a chat provider.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChatChoiceChunk {
+    /// Delta payload.
+    pub delta: ChatDelta,
+    /// Provider finish reason for this choice, if any.
+    pub finish_reason: Option<String>,
+}
+
+/// One streaming delta emitted by a chat provider.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChatDelta {
+    /// Assistant content delta.
+    pub content: Option<String>,
+    /// Assistant reasoning delta.
+    pub reasoning_content: Option<String>,
+    /// Tool call deltas.
+    pub tool_calls: Vec<ToolCallDelta>,
+}
+
+/// One streaming tool-call delta.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    /// Tool call index in the assistant message.
+    pub index: u32,
+    /// Provider or local tool call identifier.
+    pub id: Option<ToolCallId>,
+    /// Tool call kind, normally "function".
+    pub kind: Option<String>,
+    /// Function name delta.
+    pub name: Option<String>,
+    /// JSON arguments string delta.
+    pub arguments: Option<String>,
 }
 
 /// Complete non-streaming model response.

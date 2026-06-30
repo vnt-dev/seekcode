@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt::{self, Debug, Display};
 use std::path::Path;
 use thiserror::Error;
@@ -39,6 +40,14 @@ macro_rules! id_type {
                 Display::fmt(&self.0, f)
             }
         }
+
+        impl std::str::FromStr for $name {
+            type Err = ulid::DecodeError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                value.parse::<Ulid>().map(Self)
+            }
+        }
     };
 }
 
@@ -47,6 +56,7 @@ id_type!(TaskId);
 id_type!(MessageId);
 id_type!(ToolCallId);
 id_type!(WorkspaceId);
+id_type!(ModelCallLogId);
 
 /// Unified error type for scaffolded backend services.
 #[derive(Debug, Error)]
@@ -114,6 +124,10 @@ pub struct ChatMessage {
     pub content: String,
     /// Optional provider-specific reasoning content.
     pub reasoning_content: Option<String>,
+    /// Assistant tool calls attached to this message.
+    pub tool_calls: Vec<Value>,
+    /// Tool call identifier for tool result messages.
+    pub tool_call_id: Option<ToolCallId>,
     /// Creation timestamp.
     pub created_at: UtcDateTime,
 }
@@ -126,6 +140,8 @@ impl ChatMessage {
             role,
             content: content.into(),
             reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
             created_at: Utc::now(),
         }
     }
@@ -140,6 +156,8 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     /// Total number of billed tokens.
     pub total_tokens: u32,
+    /// Number of prompt tokens served from provider cache.
+    pub cached_tokens: u32,
 }
 
 /// Event emitted by backend streams to the Tauri adapter.

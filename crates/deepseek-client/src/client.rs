@@ -3,7 +3,7 @@
 use crate::dto::{
     DeepSeekChatRequest, DeepSeekChatResponse, DeepSeekMessage, DeepSeekStreamOptions,
 };
-use crate::sse::{parse_sse_frame_with_accumulator, ToolCallAccumulator};
+use crate::sse::parse_sse_frame_choices;
 use crate::tool_calls::{decode_deepseek_tool_call, decode_usage, encode_tool_specs};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -89,18 +89,21 @@ impl DeepSeekClient {
         stream: bool,
     ) -> SeekCodeResult<DeepSeekChatRequest> {
         let tools = encode_tool_specs(&request.tools)?;
+        let model = if request.model.trim().is_empty() {
+            self.config.default_model.clone()
+        } else {
+            request.model
+        };
+        let messages = request
+            .messages
+            .into_iter()
+            .map(DeepSeekMessage::from)
+            .collect::<Vec<_>>();
+        log_deepseek_request(&model, stream, &messages, tools.len());
 
         Ok(DeepSeekChatRequest {
-            model: if request.model.trim().is_empty() {
-                self.config.default_model.clone()
-            } else {
-                request.model
-            },
-            messages: request
-                .messages
-                .into_iter()
-                .map(DeepSeekMessage::from)
-                .collect(),
+            model,
+            messages,
             stream,
             tools,
             stream_options: stream.then_some(DeepSeekStreamOptions {
@@ -176,19 +179,68 @@ impl ModelProvider for DeepSeekClient {
 
 impl From<seekcode_common::ChatMessage> for DeepSeekMessage {
     fn from(message: seekcode_common::ChatMessage) -> Self {
-        let role = match message.role {
+        let seekcode_common::ChatMessage {
+            role,
+            content,
+            reasoning_content,
+            tool_calls,
+            tool_call_id,
+            ..
+        } = message;
+        let role_name = match role {
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
             ChatRole::Tool => "tool",
         };
+        let content = match role {
+            ChatRole::Assistant if content.is_empty() && tool_calls.is_empty() => Some(content),
+            ChatRole::Tool => Some(content),
+            _ if content.is_empty() => None,
+            _ => Some(content),
+        };
 
         Self {
-            role: role.to_string(),
-            content: Some(message.content),
-            reasoning_content: message.reasoning_content,
-            tool_call_id: None,
+            role: role_name.to_string(),
+            content,
+            reasoning_content,
+            tool_calls,
+            tool_call_id: tool_call_id.map(|id| id.to_string()),
         }
+    }
+}
+
+fn log_deepseek_request(
+    model: &str,
+    stream: bool,
+    messages: &[DeepSeekMessage],
+    tool_count: usize,
+) {
+    tracing::debug!(
+        target: "seekcode_deepseek_client::request",
+        model,
+        stream,
+        message_count = messages.len(),
+        tool_count,
+        "building DeepSeek chat request"
+    );
+
+    for (index, message) in messages.iter().enumerate() {
+        let serialized = serde_json::to_string(message)
+            .unwrap_or_else(|error| format!("serialize error: {error}"));
+        tracing::debug!(
+            target: "seekcode_deepseek_client::request",
+            index,
+            role = %message.role,
+            content_present = message.content.is_some(),
+            content_len = message.content.as_deref().map(str::len).unwrap_or(0),
+            reasoning_present = message.reasoning_content.is_some(),
+            reasoning_len = message.reasoning_content.as_deref().map(str::len).unwrap_or(0),
+            tool_call_count = message.tool_calls.len(),
+            tool_call_id = ?message.tool_call_id,
+            message_json = %serialized,
+            "DeepSeek request message"
+        );
     }
 }
 
@@ -217,7 +269,6 @@ enum StreamState {
         bytes: BoxStream<'static, Result<Bytes, reqwest::Error>>,
         buffer: String,
         pending: VecDeque<seekcode_model_provider::ChatChunk>,
-        accumulator: ToolCallAccumulator,
         done: bool,
     },
     Done,
@@ -242,7 +293,6 @@ async fn next_stream_item(
                             bytes: response.bytes_stream().boxed(),
                             buffer: String::new(),
                             pending: VecDeque::new(),
-                            accumulator: ToolCallAccumulator::default(),
                             done: false,
                         };
                     }
@@ -253,7 +303,6 @@ async fn next_stream_item(
                 mut bytes,
                 mut buffer,
                 mut pending,
-                mut accumulator,
                 mut done,
             } => {
                 if let Some(chunk) = pending.pop_front() {
@@ -263,7 +312,6 @@ async fn next_stream_item(
                             bytes,
                             buffer,
                             pending,
-                            accumulator,
                             done,
                         },
                     ));
@@ -284,15 +332,12 @@ async fn next_stream_item(
                                     pending.push_back(seekcode_model_provider::ChatChunk::Finished);
                                     done = true;
                                 }
-                                Some(data) => {
-                                    match parse_sse_frame_with_accumulator(&data, &mut accumulator)
-                                    {
-                                        Ok(chunks) => pending.extend(chunks),
-                                        Err(error) => {
-                                            return Some((Err(error), StreamState::Done));
-                                        }
+                                Some(data) => match parse_sse_frame_choices(&data) {
+                                    Ok(chunks) => pending.extend(chunks),
+                                    Err(error) => {
+                                        return Some((Err(error), StreamState::Done));
                                     }
-                                }
+                                },
                                 None => {}
                             }
                         }
@@ -301,7 +346,6 @@ async fn next_stream_item(
                             bytes,
                             buffer,
                             pending,
-                            accumulator,
                             done,
                         };
                     }
@@ -333,4 +377,52 @@ fn frame_data(frame: &str) -> Option<String> {
         .collect::<Vec<_>>();
 
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seekcode_common::{ChatMessage, ChatRole};
+    use serde_json::json;
+
+    #[test]
+    fn assistant_reasoning_only_message_sets_empty_content() {
+        let mut message = ChatMessage::new(ChatRole::Assistant, "");
+        message.reasoning_content = Some("thinking".to_string());
+
+        let encoded = DeepSeekMessage::from(message);
+
+        assert_eq!(encoded.role, "assistant");
+        assert_eq!(encoded.content.as_deref(), Some(""));
+        assert_eq!(encoded.reasoning_content.as_deref(), Some("thinking"));
+    }
+
+    #[test]
+    fn assistant_tool_call_message_omits_empty_content() {
+        let mut message = ChatMessage::new(ChatRole::Assistant, "");
+        message.tool_calls = vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": "{}"
+            }
+        })];
+
+        let encoded = DeepSeekMessage::from(message);
+
+        assert_eq!(encoded.role, "assistant");
+        assert_eq!(encoded.content, None);
+        assert_eq!(encoded.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn empty_tool_result_message_keeps_empty_content() {
+        let message = ChatMessage::new(ChatRole::Tool, "");
+
+        let encoded = DeepSeekMessage::from(message);
+
+        assert_eq!(encoded.role, "tool");
+        assert_eq!(encoded.content.as_deref(), Some(""));
+    }
 }

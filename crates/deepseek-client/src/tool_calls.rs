@@ -63,6 +63,7 @@ pub fn decode_usage(usage: DeepSeekUsage) -> TokenUsage {
         prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
         completion_tokens: usage.completion_tokens.unwrap_or_default(),
         total_tokens: usage.total_tokens.unwrap_or_default(),
+        cached_tokens: usage.prompt_cache_hit_tokens.unwrap_or_default(),
     }
 }
 

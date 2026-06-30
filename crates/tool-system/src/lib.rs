@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use walkdir::WalkDir;
@@ -505,13 +505,30 @@ impl Tool for ListFilesTool {
         schemars::schema_for!(ListFilesInput)
     }
 
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+    async fn execute(&self, ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+        let started_at = Instant::now();
+        tracing::debug!(
+            target: "seekcode_tool_system::list_files",
+            task_id = %ctx.task_id,
+            workspace_id = ?ctx.workspace_id,
+            workspace_root = %self.config.workspace_root.display(),
+            raw_input = %input,
+            "list_files tool started"
+        );
         let input: ListFilesInput = parse_input(input)?;
         let base = input.path.unwrap_or_else(|| PathBuf::from("."));
         let base = resolve_existing_workspace_path(&self.config.workspace_root, &base)?;
         let max_depth = input.max_depth.unwrap_or(4);
         let limit = input.limit.unwrap_or(500);
         let mut entries = Vec::new();
+        tracing::debug!(
+            target: "seekcode_tool_system::list_files",
+            task_id = %ctx.task_id,
+            base = %base.display(),
+            max_depth,
+            limit,
+            "list_files resolved input"
+        );
 
         for entry in WalkDir::new(&base)
             .max_depth(max_depth)
@@ -531,9 +548,24 @@ impl Tool for ListFilesTool {
                 "size": metadata.is_file().then_some(metadata.len()),
             }));
             if entries.len() >= limit {
+                tracing::debug!(
+                    target: "seekcode_tool_system::list_files",
+                    task_id = %ctx.task_id,
+                    entries = entries.len(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "list_files reached limit"
+                );
                 break;
             }
         }
+
+        tracing::debug!(
+            target: "seekcode_tool_system::list_files",
+            task_id = %ctx.task_id,
+            entries = entries.len(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "list_files tool finished"
+        );
 
         Ok(ToolOutput {
             content: json!({ "entries": entries }),

@@ -2,25 +2,16 @@
 
 use crate::dto::{DeepSeekChatChunk, DeepSeekFunctionCall};
 use crate::tool_calls::decode_usage;
-use seekcode_common::{SeekCodeError, SeekCodeResult, ToolCallId};
-use seekcode_model_provider::{ChatChunk, ToolCall};
-use serde_json::Value;
-use std::collections::BTreeMap;
+use seekcode_common::{SeekCodeError, SeekCodeResult};
+use seekcode_model_provider::{ChatChoiceChunk, ChatChunk, ChatDelta, ToolCallDelta};
 
 /// Parses one DeepSeek SSE data frame into provider-neutral chunks.
 pub fn parse_sse_frame(frame: &str) -> SeekCodeResult<Option<ChatChunk>> {
-    Ok(
-        parse_sse_frame_with_accumulator(frame, &mut ToolCallAccumulator::default())?
-            .into_iter()
-            .next(),
-    )
+    Ok(parse_sse_frame_choices(frame)?.into_iter().next())
 }
 
-/// Parses one DeepSeek SSE data frame and updates tool-call accumulation state.
-pub fn parse_sse_frame_with_accumulator(
-    frame: &str,
-    accumulator: &mut ToolCallAccumulator,
-) -> SeekCodeResult<Vec<ChatChunk>> {
+/// Parses one DeepSeek SSE data frame into provider-neutral choice chunks.
+pub fn parse_sse_frame_choices(frame: &str) -> SeekCodeResult<Vec<ChatChunk>> {
     let data = frame.trim();
     if data.is_empty() || data == "[DONE]" {
         return Ok(Vec::new());
@@ -35,99 +26,34 @@ pub fn parse_sse_frame_with_accumulator(
     }
 
     for choice in chunk.choices {
-        if let Some(content) = choice.delta.content {
-            if !content.is_empty() {
-                chunks.push(ChatChunk::Content(content));
-            }
-        }
-
-        if let Some(reasoning) = choice.delta.reasoning_content {
-            if !reasoning.is_empty() {
-                chunks.push(ChatChunk::Reasoning(reasoning));
-            }
-        }
-
-        for tool_delta in choice.delta.tool_calls {
-            let (name, arguments) = if let Some(function) = tool_delta.function {
-                (function.name, function.arguments)
-            } else {
-                (None, None)
-            };
-            accumulator.push_delta(tool_delta.index, tool_delta.id, name, arguments);
-        }
-
-        if choice.finish_reason.as_deref() == Some("tool_calls") {
-            for call in accumulator.take_completed()? {
-                chunks.push(ChatChunk::ToolCall(call));
-            }
-        }
+        chunks.push(ChatChunk::Choice(ChatChoiceChunk {
+            delta: ChatDelta {
+                content: choice.delta.content,
+                reasoning_content: choice.delta.reasoning_content,
+                tool_calls: choice
+                    .delta
+                    .tool_calls
+                    .into_iter()
+                    .map(|tool_delta| {
+                        let (name, arguments) = tool_delta
+                            .function
+                            .map(|function| (function.name, function.arguments))
+                            .unwrap_or((None, None));
+                        ToolCallDelta {
+                            index: tool_delta.index,
+                            id: None,
+                            kind: tool_delta.kind,
+                            name,
+                            arguments,
+                        }
+                    })
+                    .collect(),
+            },
+            finish_reason: choice.finish_reason,
+        }));
     }
 
     Ok(chunks)
-}
-
-/// Accumulates streaming tool call deltas until DeepSeek marks tool calls complete.
-#[derive(Default)]
-pub struct ToolCallAccumulator {
-    partials: BTreeMap<u32, PartialToolCall>,
-}
-
-impl ToolCallAccumulator {
-    /// Appends one tool call delta.
-    pub fn push_delta(
-        &mut self,
-        index: u32,
-        id: Option<String>,
-        name: Option<String>,
-        arguments: Option<String>,
-    ) {
-        let partial = self.partials.entry(index).or_default();
-        if let Some(id) = id {
-            partial.id = Some(id);
-        }
-        if let Some(name) = name {
-            partial.name = Some(name);
-        }
-        if let Some(arguments) = arguments {
-            partial.arguments.push_str(&arguments);
-        }
-    }
-
-    /// Drains completed tool calls in index order.
-    pub fn take_completed(&mut self) -> SeekCodeResult<Vec<ToolCall>> {
-        let partials = std::mem::take(&mut self.partials);
-        partials
-            .into_values()
-            .map(|partial| {
-                let name = partial.name.ok_or_else(|| {
-                    SeekCodeError::ModelProvider("missing streamed tool call name".to_string())
-                })?;
-                let arguments = if partial.arguments.trim().is_empty() {
-                    Value::Object(Default::default())
-                } else {
-                    serde_json::from_str(&partial.arguments).map_err(|error| {
-                        SeekCodeError::ModelProvider(format!(
-                            "invalid streamed tool arguments: {error}"
-                        ))
-                    })?
-                };
-                let _provider_id = partial.id;
-
-                Ok(ToolCall {
-                    id: ToolCallId::new(),
-                    name,
-                    arguments,
-                })
-            })
-            .collect()
-    }
-}
-
-#[derive(Default)]
-struct PartialToolCall {
-    id: Option<String>,
-    name: Option<String>,
-    arguments: String,
 }
 
 #[allow(dead_code)]
@@ -139,33 +65,29 @@ mod tests {
 
     #[test]
     fn parses_content_chunk() {
-        let chunks = parse_sse_frame_with_accumulator(
+        let chunks = parse_sse_frame_choices(
             r#"{"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}"#,
-            &mut ToolCallAccumulator::default(),
         )
         .expect("parse chunk");
 
-        assert!(matches!(&chunks[0], ChatChunk::Content(text) if text == "hello"));
+        assert!(matches!(
+            &chunks[0],
+            ChatChunk::Choice(choice) if choice.delta.content.as_deref() == Some("hello")
+        ));
     }
 
     #[test]
-    fn accumulates_streaming_tool_call_arguments() {
-        let mut accumulator = ToolCallAccumulator::default();
-        parse_sse_frame_with_accumulator(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"pa"}}]},"finish_reason":null}]}"#,
-            &mut accumulator,
-        )
-        .expect("parse first tool chunk");
-        let chunks = parse_sse_frame_with_accumulator(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"src/lib.rs\"}"}}]},"finish_reason":"tool_calls"}]}"#,
-            &mut accumulator,
+    fn parses_streaming_tool_call_delta() {
+        let chunks = parse_sse_frame_choices(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"src/lib.rs\"}"}}]},"finish_reason":"tool_calls"}]}"#,
         )
         .expect("parse final tool chunk");
 
         assert!(matches!(
             &chunks[0],
-            ChatChunk::ToolCall(call)
-                if call.name == "read_file" && call.arguments["path"] == "src/lib.rs"
+            ChatChunk::Choice(choice)
+                if choice.delta.tool_calls[0].name.as_deref() == Some("read_file")
+                    && choice.finish_reason.as_deref() == Some("tool_calls")
         ));
     }
 }

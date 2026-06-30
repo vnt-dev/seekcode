@@ -31,6 +31,9 @@ pub struct DeepSeekMessage {
     /// Thinking mode reasoning content that must be preserved across tool calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Assistant tool calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<Value>,
     /// Tool call identifier for tool result messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -105,6 +108,8 @@ pub struct DeepSeekUsage {
     pub completion_tokens: Option<u32>,
     /// Total number of tokens.
     pub total_tokens: Option<u32>,
+    /// Number of prompt tokens served from prompt cache.
+    pub prompt_cache_hit_tokens: Option<u32>,
 }
 
 /// Streaming chat completion chunk.

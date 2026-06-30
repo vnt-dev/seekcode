@@ -11,13 +11,21 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
-            commands::open_workspace,
             commands::start_agent_task,
             commands::cancel_agent_task,
             commands::list_workspace,
             commands::read_file,
             commands::get_sessions,
+            commands::open_workspace,
+            commands::list_visible_workspaces,
+            commands::hide_workspace,
+            commands::create_session,
+            commands::delete_session,
+            commands::update_session_model,
+            commands::delete_workspace_sessions,
+            commands::list_session_messages,
             commands::load_app_settings,
+            commands::fetch_provider_models,
             commands::save_app_settings
         ])
         .run(tauri::generate_context!())

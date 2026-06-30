@@ -24,6 +24,7 @@ seekcode-app-kernel.workspace = true
 seekcode-common.workspace = true
 seekcode-storage.workspace = true
 seekcode-workspace.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { workspace = true, features = [] }
