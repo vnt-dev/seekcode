@@ -1,6 +1,6 @@
 //! Agent loop events and the helpers used to publish them.
 
-use seekcode_common::{SeekCodeResult, SessionId, TaskId, TokenUsage, ToolCallId};
+use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, TaskId, TokenUsage, ToolCallId};
 use seekcode_tool_system::{
     ToolOutput, INSERT_LINES_TOOL, READ_FILE_TOOL, RUN_COMMAND_TOOL, SEARCH_TEXT_TOOL,
     WRITE_FILE_TOOL,
@@ -124,6 +124,10 @@ pub enum AgentEvent {
         task_id: TaskId,
         /// One-based model round identifier within this task.
         round_id: u32,
+        /// Full assistant message assembled from streamed model output.
+        assistant_message: ChatMessage,
+        /// Tool result messages produced while handling this model round.
+        tool_messages: Vec<ChatMessage>,
         /// Final usage accounting if returned by the provider.
         usage: Option<TokenUsage>,
     },

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream;
 use seekcode_common::{
-    ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, ToolCallId, WorkspaceId,
+    ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, TokenUsage, ToolCallId, WorkspaceId,
 };
 use seekcode_deepseek_client::{
     ChatChunk, ChatRequest, ChatResponse, ChatStream, ModelProfile, ModelProvider,
@@ -160,7 +160,16 @@ async fn start_task_publishes_stream_events() {
     let agent = Agent::new(
         AgentConfig::default(),
         Arc::new(MockProvider {
-            chunks: vec![ChatChunk::Content("hello".to_string()), ChatChunk::Finished],
+            chunks: vec![
+                ChatChunk::Content("hello".to_string()),
+                ChatChunk::Usage(TokenUsage {
+                    prompt_tokens: 11,
+                    completion_tokens: 7,
+                    total_tokens: 18,
+                    cached_tokens: 3,
+                }),
+                ChatChunk::Finished,
+            ],
             pending: false,
         }),
         Arc::new(ToolRegistry::new()),
@@ -185,6 +194,7 @@ async fn start_task_publishes_stream_events() {
 
     let mut saw_started = false;
     let mut saw_token = false;
+    let mut saw_round_finished = false;
     let mut saw_finished = false;
     for _ in 0..20 {
         let event = events.recv().await.expect("event is published");
@@ -197,6 +207,18 @@ async fn start_task_publishes_stream_events() {
             {
                 saw_token = true;
             }
+            AgentEvent::ModelRoundFinished {
+                task_id,
+                assistant_message,
+                tool_messages,
+                usage,
+                ..
+            } if task_id == task.id => {
+                saw_round_finished = true;
+                assert_eq!(assistant_message.content, "hello");
+                assert!(tool_messages.is_empty());
+                assert_eq!(usage.expect("usage is present").prompt_tokens, 11);
+            }
             AgentEvent::Finished { task_id, .. } if task_id == task.id => {
                 saw_finished = true;
                 break;
@@ -207,6 +229,7 @@ async fn start_task_publishes_stream_events() {
 
     assert!(saw_started);
     assert!(saw_token);
+    assert!(saw_round_finished);
     assert!(saw_finished);
 }
 
@@ -286,6 +309,12 @@ async fn start_task_continues_after_tool_result() {
             },
             finish_reason: Some("tool_calls".to_string()),
         }),
+        ChatChunk::Usage(TokenUsage {
+            prompt_tokens: 21,
+            completion_tokens: 9,
+            total_tokens: 30,
+            cached_tokens: 4,
+        }),
         ChatChunk::Finished,
     ]);
     rounds.push_back(vec![
@@ -324,6 +353,7 @@ async fn start_task_continues_after_tool_result() {
         .expect("task starts");
 
     let mut saw_tool_finished = false;
+    let mut saw_tool_round_finished = false;
     let mut saw_second_round = false;
     let mut saw_final_text = false;
     for _ in 0..30 {
@@ -331,6 +361,19 @@ async fn start_task_continues_after_tool_result() {
         match event {
             AgentEvent::ToolCallFinished { task_id, ok, .. } if task_id == task.id && ok => {
                 saw_tool_finished = true;
+            }
+            AgentEvent::ModelRoundFinished {
+                task_id,
+                round_id: 1,
+                assistant_message,
+                tool_messages,
+                usage,
+                ..
+            } if task_id == task.id => {
+                saw_tool_round_finished = true;
+                assert_eq!(assistant_message.tool_calls.len(), 1);
+                assert_eq!(tool_messages.len(), 1);
+                assert_eq!(usage.expect("usage is present").prompt_tokens, 21);
             }
             AgentEvent::ModelRequestStarted {
                 task_id,
@@ -350,6 +393,7 @@ async fn start_task_continues_after_tool_result() {
     }
 
     assert!(saw_tool_finished);
+    assert!(saw_tool_round_finished);
     assert!(saw_second_round);
     assert!(saw_final_text);
     let _ = std::fs::remove_dir_all(workspace_root);

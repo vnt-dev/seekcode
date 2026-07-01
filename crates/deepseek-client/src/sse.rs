@@ -5,7 +5,6 @@ use crate::tool_calls::decode_usage;
 use crate::{ChatChoiceChunk, ChatChunk, ChatDelta, ToolCallDelta};
 use seekcode_common::{SeekCodeError, SeekCodeResult};
 
-
 /// Parses one DeepSeek SSE data frame into provider-neutral choice chunks.
 pub fn parse_sse_frame_choices(frame: &str) -> SeekCodeResult<Vec<ChatChunk>> {
     // tracing::debug!("parse_sse_frame_choices {:?}", frame);

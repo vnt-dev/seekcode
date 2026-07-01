@@ -335,12 +335,12 @@ fn new_model_call_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seekcode_common::{MessageId, SessionId};
+    use seekcode_common::SessionId;
     use seekcode_storage::SessionMessageRecord;
 
     fn record(turn: i64, role: ChatRole, content: &str) -> SessionMessageRecord {
         SessionMessageRecord {
-            id: MessageId::new(),
+            id: 1,
             session_id: SessionId::new(),
             turn_sequence: turn,
             role,
@@ -354,7 +354,6 @@ mod tests {
 
     fn record_as_message(record: SessionMessageRecord) -> ChatMessage {
         let mut message = ChatMessage::new(record.role, record.content);
-        message.id = record.id;
         message.reasoning_content = record.reasoning_content;
         message.tool_calls = record.tool_calls;
         message.tool_call_id = record.tool_call_id;

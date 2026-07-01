@@ -15,8 +15,6 @@ pub(crate) fn spawn_session_agent_event_bridge(
     turn_sequence: i64,
 ) {
     tokio::spawn(async move {
-        let mut content = String::new();
-        let mut reasoning = String::new();
         let model_provider = sessions
             .get_session(session_id)
             .await
@@ -33,15 +31,6 @@ pub(crate) fn spawn_session_agent_event_bridge(
                     choice,
                     ..
                 }) if event_task_id == task_id && event_session_id == session_id => {
-                    if let Some(text) = &choice.delta.content {
-                        content.push_str(text);
-                    }
-                    if let Some(text) = &choice.delta.reasoning_content {
-                        reasoning.push_str(text);
-                    }
-                    sessions
-                        .persist_assistant_choice(session_id, turn_sequence, &choice)
-                        .await;
                     if let Err(error) = ui_events.send(AgentEvent::ModelChoice {
                         session_id: event_session_id,
                         task_id: event_task_id,
@@ -64,7 +53,6 @@ pub(crate) fn spawn_session_agent_event_bridge(
                     text,
                     ..
                 }) if event_task_id == task_id && event_session_id == session_id => {
-                    content.push_str(&text);
                     if let Err(error) = ui_events.send(AgentEvent::AssistantToken {
                         session_id: event_session_id,
                         task_id: event_task_id,
@@ -87,7 +75,6 @@ pub(crate) fn spawn_session_agent_event_bridge(
                     text,
                     ..
                 }) if event_task_id == task_id && event_session_id == session_id => {
-                    reasoning.push_str(&text);
                     if let Err(error) = ui_events.send(AgentEvent::AssistantReasoning {
                         session_id: event_session_id,
                         task_id: event_task_id,
@@ -167,8 +154,20 @@ pub(crate) fn spawn_session_agent_event_bridge(
                             });
                         }
                         AgentEvent::ModelRoundFinished {
-                            round_id, usage, ..
+                            round_id,
+                            assistant_message,
+                            tool_messages,
+                            usage,
+                            ..
                         } => {
+                            sessions
+                                .persist_model_round_messages(
+                                    session_id,
+                                    turn_sequence,
+                                    assistant_message,
+                                    tool_messages,
+                                )
+                                .await;
                             if let Some(usage) = usage {
                                 // Record the latest input token count so the next
                                 // task can decide whether to compact the context.
@@ -194,21 +193,8 @@ pub(crate) fn spawn_session_agent_event_bridge(
                                     .await;
                             }
                         }
-                        AgentEvent::ToolCallFinished {
-                            tool_call_id,
-                            output,
-                            error,
-                            ..
-                        } => {
-                            sessions
-                                .persist_tool_result(
-                                    session_id,
-                                    turn_sequence,
-                                    *tool_call_id,
-                                    output.clone(),
-                                    error.clone(),
-                                )
-                                .await;
+                        AgentEvent::ToolCallFinished { .. } => {
+                            // Tool results are persisted with the completed model round.
                         }
                         _ => {}
                     }

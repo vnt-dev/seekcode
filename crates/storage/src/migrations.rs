@@ -53,7 +53,7 @@ impl MigrationRunner {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS session_messages (
-                id TEXT PRIMARY KEY NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 turn_sequence INTEGER NOT NULL,
                 role TEXT NOT NULL,
@@ -121,7 +121,7 @@ impl MigrationRunner {
         .map_err(storage_error)?;
 
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_session_messages_session_id_turn_order ON session_messages(session_id, turn_sequence, created_at, id)",
+            "CREATE INDEX IF NOT EXISTS idx_session_messages_session_id_turn_order ON session_messages(session_id, turn_sequence, id)",
         )
         .execute(pool)
         .await

@@ -19,8 +19,8 @@ use seekcode_agent_core::{
     StartTaskRequest,
 };
 use seekcode_common::{
-    init_tracing, ChatMessage, ChatRole, MessageId, SeekCodeError, SeekCodeResult, SessionId,
-    TaskId, ToolCallId, WorkspaceId,
+    init_tracing, ChatMessage, ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId,
+    WorkspaceId,
 };
 use seekcode_deepseek_client::{DeepSeekClient, DeepSeekConfig, ModelProvider};
 use seekcode_policy::{AutonomousPolicy, PolicyEngine};
@@ -89,7 +89,6 @@ impl SessionService {
 
         self.storage()?
             .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
                 session_id,
                 turn_sequence,
                 role: ChatRole::User,
@@ -104,94 +103,71 @@ impl SessionService {
         Ok(turn_sequence)
     }
 
-    pub(crate) async fn persist_assistant_choice(
+    pub(crate) async fn persist_model_round_messages(
         &self,
         session_id: SessionId,
         turn_sequence: i64,
-        choice: &seekcode_deepseek_client::ChatChoiceChunk,
+        assistant_message: &ChatMessage,
+        tool_messages: &[ChatMessage],
     ) {
-        let content = choice.delta.content.clone().unwrap_or_default();
-        let reasoning_content = choice.delta.reasoning_content.clone();
-        let tool_calls = choice_tool_calls_json(choice);
         tracing::debug!(
             target: "seekcode_app_kernel::session_messages",
             %session_id,
             turn_sequence,
-            finish_reason = ?choice.finish_reason,
-            content_len = content.len(),
-            reasoning_len = reasoning_content.as_deref().map(str::len).unwrap_or(0),
-            tool_call_count = tool_calls.len(),
-            tool_calls = %serde_json::Value::Array(tool_calls.clone()),
-            "persisting assistant choice delta"
+            content_len = assistant_message.content.len(),
+            reasoning_len = assistant_message.reasoning_content.as_deref().map(str::len).unwrap_or(0),
+            tool_call_count = assistant_message.tool_calls.len(),
+            tool_result_count = tool_messages.len(),
+            "persisting completed model round messages"
         );
 
-        if content.is_empty() && reasoning_content.is_none() && tool_calls.is_empty() {
-            return;
-        }
-
         let storage = match self.storage() {
             Ok(storage) => storage,
             Err(error) => {
-                tracing::warn!(%error, "failed to persist assistant delta");
+                tracing::warn!(%error, "failed to persist completed model round messages");
                 return;
             }
         };
 
-        if let Err(error) = storage
-            .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
-                session_id,
-                turn_sequence,
-                role: ChatRole::Assistant,
-                content,
-                reasoning_content,
-                tool_calls,
-                tool_call_id: None,
-                created_at: local_now_text(),
-            })
-            .await
+        if !assistant_message.content.is_empty()
+            || assistant_message.reasoning_content.is_some()
+            || !assistant_message.tool_calls.is_empty()
         {
-            tracing::warn!(%error, "failed to persist assistant delta");
-        }
-    }
-
-    pub(crate) async fn persist_tool_result(
-        &self,
-        session_id: SessionId,
-        turn_sequence: i64,
-        tool_call_id: ToolCallId,
-        output: Option<serde_json::Value>,
-        error: Option<String>,
-    ) {
-        let content = match (output, error) {
-            (Some(output), _) => serde_json::to_string(&output).unwrap_or_default(),
-            (None, Some(error)) => error,
-            (None, None) => String::new(),
-        };
-
-        let storage = match self.storage() {
-            Ok(storage) => storage,
-            Err(error) => {
-                tracing::warn!(%error, "failed to persist tool result");
+            if let Err(error) = storage
+                .append_session_message(NewSessionMessage {
+                    session_id,
+                    turn_sequence,
+                    role: ChatRole::Assistant,
+                    content: assistant_message.content.clone(),
+                    reasoning_content: assistant_message.reasoning_content.clone(),
+                    tool_calls: assistant_message.tool_calls.clone(),
+                    tool_call_id: None,
+                    created_at: local_now_text(),
+                })
+                .await
+            {
+                tracing::warn!(%error, "failed to persist assistant model round message");
                 return;
             }
-        };
+        }
 
-        if let Err(error) = storage
-            .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
-                session_id,
-                turn_sequence,
-                role: ChatRole::Tool,
-                content,
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tool_call_id),
-                created_at: local_now_text(),
-            })
-            .await
-        {
-            tracing::warn!(%error, "failed to persist tool result");
+        for message in tool_messages {
+            if let Err(error) = storage
+                .append_session_message(NewSessionMessage {
+                    session_id,
+                    turn_sequence,
+                    role: ChatRole::Tool,
+                    content: message.content.clone(),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    tool_call_id: message.tool_call_id,
+                    created_at: local_now_text(),
+                })
+                .await
+            {
+                tracing::warn!(%error, "failed to persist tool model round message");
+                return;
+            }
         }
     }
 
@@ -1028,41 +1004,6 @@ fn normalize_reasoning_effort(value: Option<String>) -> Option<String> {
     matches!(value.as_str(), "high" | "max").then_some(value)
 }
 
-fn choice_tool_calls_json(
-    choice: &seekcode_deepseek_client::ChatChoiceChunk,
-) -> Vec<serde_json::Value> {
-    choice
-        .delta
-        .tool_calls
-        .iter()
-        .map(|tool_call| {
-            let mut call = serde_json::Map::new();
-            if let Some(id) = tool_call.id {
-                call.insert("id".to_string(), serde_json::Value::String(id.to_string()));
-            }
-            call.insert(
-                "type".to_string(),
-                serde_json::Value::String(
-                    tool_call.kind.as_deref().unwrap_or("function").to_string(),
-                ),
-            );
-
-            let mut function = serde_json::Map::new();
-            if let Some(name) = &tool_call.name {
-                function.insert("name".to_string(), serde_json::Value::String(name.clone()));
-            }
-            if let Some(arguments) = &tool_call.arguments {
-                function.insert(
-                    "arguments".to_string(),
-                    serde_json::Value::String(arguments.clone()),
-                );
-            }
-            call.insert("function".to_string(), serde_json::Value::Object(function));
-            serde_json::Value::Object(call)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1013,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Local;
     use seekcode_agent_core::AgentEvent;
+    use seekcode_common::{TokenUsage, ToolCallId};
     use seekcode_deepseek_client::{
         ChatChunk, ChatRequest, ChatResponse, ChatStream, ModelProfile,
     };
@@ -1119,6 +1061,45 @@ mod tests {
         }
     }
 
+    struct StreamingProvider {
+        rounds: std::sync::Mutex<std::collections::VecDeque<Vec<ChatChunk>>>,
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for StreamingProvider {
+        fn stream_chat(&self, request: ChatRequest) -> SeekCodeResult<ChatStream> {
+            self.requests.lock().expect("requests lock").push(request);
+            let chunks = self
+                .rounds
+                .lock()
+                .expect("rounds lock")
+                .pop_front()
+                .unwrap_or_default()
+                .into_iter()
+                .map(Ok);
+            Ok(Box::pin(futures_util::stream::iter(chunks)))
+        }
+
+        async fn complete_chat(&self, _request: ChatRequest) -> SeekCodeResult<ChatResponse> {
+            Ok(ChatResponse {
+                content: "summary".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                usage: None,
+            })
+        }
+
+        async fn model_profile(&self, model: &str) -> SeekCodeResult<ModelProfile> {
+            Ok(ModelProfile {
+                id: model.to_string(),
+                context_window: 1_000,
+                supports_tools: true,
+                supports_thinking: true,
+            })
+        }
+    }
+
     async fn seed_session(storage: &SqliteStorage) -> SessionId {
         let workspace_id = WorkspaceId::new();
         let session_id = SessionId::new();
@@ -1154,7 +1135,6 @@ mod tests {
     async fn seed_user_turn(storage: &SqliteStorage, session_id: SessionId, turn: i64, text: &str) {
         storage
             .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
                 session_id,
                 turn_sequence: turn,
                 role: ChatRole::User,
@@ -1178,7 +1158,6 @@ mod tests {
     ) {
         storage
             .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
                 session_id,
                 turn_sequence: turn,
                 role: ChatRole::Assistant,
@@ -1201,7 +1180,6 @@ mod tests {
     ) {
         storage
             .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
                 session_id,
                 turn_sequence: turn,
                 role: ChatRole::Tool,
@@ -1259,7 +1237,7 @@ mod tests {
         let workspace_id = WorkspaceId::new();
         let session_id = SessionId::new();
         let root =
-            std::env::temp_dir().join(format!("seekcode-env-context-test-{}", MessageId::new()));
+            std::env::temp_dir().join(format!("seekcode-env-context-test-{}", WorkspaceId::new()));
         std::fs::create_dir_all(&root).expect("workspace dir creates");
         let workspace_path = root.to_string_lossy().to_string();
 
@@ -1286,7 +1264,6 @@ mod tests {
             .expect("session creates");
         storage
             .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
                 session_id,
                 turn_sequence: 1,
                 role: ChatRole::User,
@@ -1331,7 +1308,8 @@ mod tests {
         let storage = SqliteStorage::connect("sqlite::memory:")
             .await
             .expect("storage connects");
-        let root = std::env::temp_dir().join(format!("seekcode-agents-test-{}", MessageId::new()));
+        let root =
+            std::env::temp_dir().join(format!("seekcode-agents-test-{}", WorkspaceId::new()));
         std::fs::create_dir_all(&root).expect("workspace dir creates");
         std::fs::write(root.join("AGENTS.md"), "Use workspace conventions.")
             .expect("agents file writes");
@@ -1597,6 +1575,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_agent_task_persists_completed_model_round_messages_and_usage() {
+        let storage = Arc::new(
+            SqliteStorage::connect("sqlite::memory:")
+                .await
+                .expect("storage connects"),
+        );
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let workspace_root =
+            std::env::temp_dir().join(format!("seekcode-round-persist-test-{workspace_id}"));
+        std::fs::create_dir_all(&workspace_root).expect("workspace dir creates");
+        std::fs::write(workspace_root.join("fixture.txt"), "needle\n").expect("fixture writes");
+        storage
+            .create_workspace(NewWorkspace {
+                id: workspace_id,
+                name: "SeekCode".to_string(),
+                absolute_path: workspace_root.to_string_lossy().to_string(),
+                is_visible: true,
+            })
+            .await
+            .expect("workspace creates");
+        storage
+            .create_session(NewSession {
+                id: session_id,
+                workspace_id,
+                name: "Chat".to_string(),
+                model_provider: "deepseek".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                thinking_enabled: true,
+                reasoning_effort: None,
+            })
+            .await
+            .expect("session creates");
+
+        let mut rounds = std::collections::VecDeque::new();
+        rounds.push_back(vec![
+            ChatChunk::Choice(seekcode_deepseek_client::ChatChoiceChunk {
+                delta: seekcode_deepseek_client::ChatDelta {
+                    content: None,
+                    reasoning_content: Some("checking files".to_string()),
+                    tool_calls: vec![seekcode_deepseek_client::ToolCallDelta {
+                        index: 0,
+                        id: None,
+                        kind: Some("function".to_string()),
+                        name: Some(seekcode_tool_system::SEARCH_TEXT_TOOL.to_string()),
+                        arguments: Some(r#"{"pattern":"needle","path":"fixture.txt"}"#.to_string()),
+                    }],
+                },
+                finish_reason: Some("tool_calls".to_string()),
+            }),
+            ChatChunk::Usage(TokenUsage {
+                prompt_tokens: 21,
+                completion_tokens: 9,
+                total_tokens: 30,
+                cached_tokens: 4,
+            }),
+            ChatChunk::Finished,
+        ]);
+        rounds.push_back(vec![
+            ChatChunk::Content("done".to_string()),
+            ChatChunk::Usage(TokenUsage {
+                prompt_tokens: 31,
+                completion_tokens: 5,
+                total_tokens: 36,
+                cached_tokens: 2,
+            }),
+            ChatChunk::Finished,
+        ]);
+
+        let kernel = AppKernel::with_storage(AppKernelConfig::default(), storage.clone())
+            .expect("kernel builds");
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(StreamingProvider {
+            rounds: std::sync::Mutex::new(rounds),
+            requests,
+        });
+        kernel.services.agent.set_provider(provider.clone());
+        *kernel.services.provider.write() = provider;
+
+        let mut started = kernel
+            .start_agent_task(StartTaskRequest {
+                session_id,
+                prompt: "Find needle".to_string(),
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+            })
+            .await
+            .expect("task starts");
+
+        while let Some(event) = started.events.recv().await {
+            if matches!(event, AgentEvent::Finished { task_id, .. } if task_id == started.task.id) {
+                break;
+            }
+        }
+
+        let messages = storage
+            .list_session_messages(session_id)
+            .await
+            .expect("messages list");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, ChatRole::User);
+        assert_eq!(messages[1].role, ChatRole::Assistant);
+        assert_eq!(
+            messages[1].reasoning_content.as_deref(),
+            Some("checking files")
+        );
+        assert_eq!(messages[1].tool_calls.len(), 1);
+        assert_eq!(messages[2].role, ChatRole::Tool);
+        assert!(messages[2].tool_call_id.is_some());
+        assert!(messages[2].content.contains("matches"));
+        assert_eq!(messages[3].role, ChatRole::Assistant);
+        assert_eq!(messages[3].content, "done");
+
+        let stats = kernel
+            .session_model_call_stats(session_id)
+            .await
+            .expect("stats load");
+        assert_eq!(stats.call_count, 2);
+        assert_eq!(stats.input_tokens, 52);
+        assert_eq!(stats.output_tokens, 14);
+        assert_eq!(stats.cache_hit_tokens, 6);
+        assert_eq!(
+            kernel
+                .session_context_usage(session_id)
+                .await
+                .expect("context usage loads"),
+            31
+        );
+
+        std::fs::remove_dir_all(workspace_root).expect("workspace dir cleans up");
+    }
+
+    #[tokio::test]
     async fn start_agent_task_compacts_inside_runner_and_reassembles_context() {
         let storage = Arc::new(
             SqliteStorage::connect("sqlite::memory:")
@@ -1745,7 +1857,8 @@ mod tests {
 
     #[test]
     fn skills_system_message_lists_skill_md_files() {
-        let root = std::env::temp_dir().join(format!("seekcode-skills-test-{}", MessageId::new()));
+        let root =
+            std::env::temp_dir().join(format!("seekcode-skills-test-{}", WorkspaceId::new()));
         let skill_dir = root.join("skills").join("sample-skill");
         std::fs::create_dir_all(&skill_dir).expect("skill dir creates");
         std::fs::write(
@@ -1767,7 +1880,7 @@ mod tests {
     #[test]
     fn skills_system_message_is_absent_without_skill_files() {
         let root =
-            std::env::temp_dir().join(format!("seekcode-empty-skills-test-{}", MessageId::new()));
+            std::env::temp_dir().join(format!("seekcode-empty-skills-test-{}", WorkspaceId::new()));
         std::fs::create_dir_all(root.join("skills")).expect("skills dir creates");
 
         let message = build_skills_system_message_for_dir(&root.join("skills"));

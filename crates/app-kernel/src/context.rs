@@ -1,5 +1,5 @@
 use chrono::Local;
-use seekcode_common::{ChatMessage, ChatRole, MessageId, SessionId};
+use seekcode_common::{ChatMessage, ChatRole, SessionId};
 use seekcode_storage::SessionMessageRecord;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -166,7 +166,6 @@ pub(crate) fn push_record_as_context_message(
     messages: &mut Vec<ChatMessage>,
 ) {
     let mut message = ChatMessage::new(record.role, record.content);
-    message.id = record.id;
     message.reasoning_content = record.reasoning_content;
     message.tool_calls = record.tool_calls;
     message.tool_call_id = record.tool_call_id;
@@ -303,7 +302,6 @@ fn append_valid_tool_context_messages(
                     tracing::warn!(
                         target: "seekcode_app_kernel::context",
                         %session_id,
-                        message_id = %message.id,
                         "dropping tool message without tool_call_id"
                     );
                     continue;
@@ -315,7 +313,6 @@ fn append_valid_tool_context_messages(
                     tracing::warn!(
                         target: "seekcode_app_kernel::context",
                         %session_id,
-                        message_id = %message.id,
                         %tool_call_id,
                         "dropping orphan tool message without matching assistant tool call"
                     );
@@ -363,7 +360,7 @@ impl PersistedToolCallAccumulator {
     fn apply(
         &mut self,
         session_id: SessionId,
-        message_id: MessageId,
+        message_id: i64,
         tool_calls: Vec<serde_json::Value>,
     ) {
         for tool_call in tool_calls {

@@ -7,7 +7,7 @@ use crate::sqlite::SqliteStorage;
 use crate::time::{local_now_text, utc_to_local_text};
 use crate::traits::SessionStore;
 use async_trait::async_trait;
-use seekcode_common::{ChatMessage, MessageId, SeekCodeResult, SessionId, ToolCallId, WorkspaceId};
+use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, ToolCallId, WorkspaceId};
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 
@@ -167,10 +167,9 @@ impl SessionStore for SqliteStorage {
         &self,
         message: NewSessionMessage,
     ) -> SeekCodeResult<SessionMessageRecord> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO session_messages (
-                id,
                 session_id,
                 turn_sequence,
                 role,
@@ -180,10 +179,9 @@ impl SessionStore for SqliteStorage {
                 tool_call_id,
                 created_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
         )
-        .bind(message.id.to_string())
         .bind(message.session_id.to_string())
         .bind(message.turn_sequence)
         .bind(chat_role_to_str(&message.role))
@@ -197,7 +195,7 @@ impl SessionStore for SqliteStorage {
         .map_err(storage_error)?;
 
         touch_session(&self.pool, message.session_id).await?;
-        get_session_message(&self.pool, message.id).await
+        get_session_message(&self.pool, result.last_insert_rowid()).await
     }
 
     async fn list_session_messages(
@@ -209,7 +207,7 @@ impl SessionStore for SqliteStorage {
             SELECT id, session_id, turn_sequence, role, content, reasoning_content, tool_calls, tool_call_id, created_at
             FROM session_messages
             WHERE session_id = ?1
-            ORDER BY turn_sequence ASC, created_at ASC, id ASC
+            ORDER BY turn_sequence ASC, id ASC
             "#,
         )
         .bind(session_id.to_string())
@@ -233,7 +231,7 @@ impl SessionStore for SqliteStorage {
             WHERE session_id = ?1
               AND turn_sequence > ?2
               AND (?3 IS NULL OR turn_sequence < ?3)
-            ORDER BY turn_sequence ASC, created_at ASC, id ASC
+            ORDER BY turn_sequence ASC, id ASC
             "#,
         )
         .bind(session_id.to_string())
@@ -268,7 +266,7 @@ impl SessionStore for SqliteStorage {
                   LIMIT ?3
                 )
               )
-            ORDER BY turn_sequence ASC, created_at ASC, id ASC
+            ORDER BY turn_sequence ASC, id ASC
             "#,
         )
         .bind(session_id.to_string())
@@ -292,7 +290,6 @@ impl SessionStore for SqliteStorage {
     ) -> SeekCodeResult<()> {
         let turn_sequence = next_turn_sequence(&self.pool, session_id).await?;
         let new_message = NewSessionMessage {
-            id: message.id,
             session_id,
             turn_sequence,
             role: message.role,
@@ -351,7 +348,7 @@ async fn get_session(pool: &SqlitePool, session_id: SessionId) -> SeekCodeResult
 
 async fn get_session_message(
     pool: &SqlitePool,
-    message_id: MessageId,
+    message_id: i64,
 ) -> SeekCodeResult<SessionMessageRecord> {
     let row = sqlx::query(
         r#"
@@ -360,7 +357,7 @@ async fn get_session_message(
         WHERE id = ?1
         "#,
     )
-    .bind(message_id.to_string())
+    .bind(message_id)
     .fetch_optional(pool)
     .await
     .map_err(storage_error)?
@@ -425,7 +422,7 @@ fn session_message_from_row(row: sqlx::sqlite::SqliteRow) -> SeekCodeResult<Sess
         .transpose()?;
 
     Ok(SessionMessageRecord {
-        id: parse_id(row_get::<String>(&row, "id")?)?,
+        id: row_get(&row, "id")?,
         session_id: parse_id(row_get::<String>(&row, "session_id")?)?,
         turn_sequence: row_get(&row, "turn_sequence")?,
         role,

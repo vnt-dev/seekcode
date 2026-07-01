@@ -1,10 +1,10 @@
-use crate::time::{local_now_text, LOCAL_TIME_FORMAT};
+﻿use crate::time::{local_now_text, LOCAL_TIME_FORMAT};
 use crate::{
     MigrationRunner, ModelCallLogStore, NewSession, NewSessionMessage, NewWorkspace,
     SessionContextStore, SessionStore, SqliteStorage, WorkspaceStore,
 };
 use chrono::NaiveDateTime;
-use seekcode_common::{ChatMessage, ChatRole, MessageId, ModelCallLogId, SessionId, WorkspaceId};
+use seekcode_common::{ChatMessage, ChatRole, ModelCallLogId, SessionId, WorkspaceId};
 use sqlx::sqlite::SqlitePoolOptions;
 
 #[tokio::test]
@@ -97,7 +97,6 @@ async fn stores_workspace_session_and_messages_with_local_time_text() {
 
     storage
         .append_session_message(NewSessionMessage {
-            id: MessageId::new(),
             session_id,
             turn_sequence: 1,
             role: ChatRole::User,
@@ -128,6 +127,7 @@ async fn stores_workspace_session_and_messages_with_local_time_text() {
 
     assert_eq!(sessions.len(), 1);
     assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].id, messages[0].id + 1);
     assert_eq!(messages[0].turn_sequence, 1);
     assert_eq!(messages[1].turn_sequence, 2);
     assert_eq!(messages[1].role, ChatRole::Assistant);
@@ -200,7 +200,6 @@ async fn lists_session_messages_by_recent_turn_pages() {
     for turn_sequence in 1..=25 {
         storage
             .append_session_message(NewSessionMessage {
-                id: MessageId::new(),
                 session_id,
                 turn_sequence,
                 role: ChatRole::User,
@@ -215,7 +214,6 @@ async fn lists_session_messages_by_recent_turn_pages() {
     }
     storage
         .append_session_message(NewSessionMessage {
-            id: MessageId::new(),
             session_id,
             turn_sequence: 25,
             role: ChatRole::Assistant,
@@ -259,6 +257,67 @@ async fn lists_session_messages_by_recent_turn_pages() {
     assert_eq!(range.len(), 4);
     assert_eq!(range.first().map(|message| message.turn_sequence), Some(11));
     assert_eq!(range.last().map(|message| message.turn_sequence), Some(14));
+}
+
+#[tokio::test]
+async fn lists_session_messages_in_insert_order_within_same_turn() {
+    let storage = test_storage().await;
+    let workspace_id = WorkspaceId::new();
+    let session_id = SessionId::new();
+    storage
+        .create_workspace(NewWorkspace {
+            id: workspace_id,
+            name: "SeekCode".to_string(),
+            absolute_path: "D:\\rust\\tmp\\seekcode".to_string(),
+            is_visible: true,
+        })
+        .await
+        .expect("create workspace");
+    storage
+        .create_session(NewSession {
+            id: session_id,
+            workspace_id,
+            name: "Ordered chat".to_string(),
+            model_provider: "deepseek".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            thinking_enabled: true,
+            reasoning_effort: None,
+        })
+        .await
+        .expect("create session");
+
+    for (role, content) in [
+        (ChatRole::User, "question"),
+        (ChatRole::Assistant, "tool call"),
+        (ChatRole::Tool, "tool result"),
+        (ChatRole::Assistant, "answer"),
+    ] {
+        storage
+            .append_session_message(NewSessionMessage {
+                session_id,
+                turn_sequence: 1,
+                role,
+                content: content.to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                created_at: "2026-01-01 00:00:00".to_string(),
+            })
+            .await
+            .expect("append message");
+    }
+
+    let messages = storage
+        .list_session_messages(session_id)
+        .await
+        .expect("messages list");
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["question", "tool call", "tool result", "answer"]
+    );
 }
 
 #[tokio::test]

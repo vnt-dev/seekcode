@@ -165,7 +165,6 @@ impl AgentTaskRunner {
 
             let mut stream = self.provider.stream_chat(chat_request)?;
             let mut final_usage = None;
-            let mut sent_round_finished = false;
             let mut tool_calls = ToolCallAccumulator::default();
             let mut tool_results = Vec::new();
             let mut round_content = String::new();
@@ -231,30 +230,25 @@ impl AgentTaskRunner {
                         );
                     }
                     ChatChunk::Usage(usage) => {
-                        final_usage = Some(usage.clone());
+                        final_usage = Some(usage);
+                    }
+                    ChatChunk::Finished => {
+                        let (assistant_message, tool_messages) = build_model_round_messages(
+                            round_content.clone(),
+                            round_reasoning.clone(),
+                            &tool_results,
+                        );
                         publish(
                             &self.events,
                             AgentEvent::ModelRoundFinished {
                                 session_id,
                                 task_id,
                                 round_id,
-                                usage: Some(usage),
+                                assistant_message,
+                                tool_messages,
+                                usage: final_usage.clone(),
                             },
                         );
-                        sent_round_finished = true;
-                    }
-                    ChatChunk::Finished => {
-                        if !sent_round_finished {
-                            publish(
-                                &self.events,
-                                AgentEvent::ModelRoundFinished {
-                                    session_id,
-                                    task_id,
-                                    round_id,
-                                    usage: final_usage,
-                                },
-                            );
-                        }
                         break;
                     }
                 }
@@ -419,6 +413,19 @@ pub(crate) fn append_tool_results_to_context(
     reasoning_content: String,
     tool_results: Vec<ToolCallRunResult>,
 ) {
+    let (assistant, tool_messages) =
+        build_model_round_messages(content, reasoning_content, &tool_results);
+
+    messages.push(assistant);
+    messages.extend(tool_messages);
+}
+
+/// Builds the assistant message and tool result messages for one completed model API call.
+pub(crate) fn build_model_round_messages(
+    content: String,
+    reasoning_content: String,
+    tool_results: &[ToolCallRunResult],
+) -> (ChatMessage, Vec<ChatMessage>) {
     let mut assistant = ChatMessage::new(ChatRole::Assistant, content);
     if !reasoning_content.is_empty() {
         assistant.reasoning_content = Some(reasoning_content);
@@ -436,13 +443,15 @@ pub(crate) fn append_tool_results_to_context(
             })
         })
         .collect();
-    messages.push(assistant);
 
+    let mut tool_messages = Vec::with_capacity(tool_results.len());
     for result in tool_results {
-        let mut message = ChatMessage::new(ChatRole::Tool, result.result_content);
+        let mut message = ChatMessage::new(ChatRole::Tool, result.result_content.clone());
         message.tool_call_id = Some(result.tool_call.id);
-        messages.push(message);
+        tool_messages.push(message);
     }
+
+    (assistant, tool_messages)
 }
 
 /// Reassembles streamed tool-call deltas into complete tool calls.

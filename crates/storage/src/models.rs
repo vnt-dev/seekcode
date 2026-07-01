@@ -1,6 +1,4 @@
-use seekcode_common::{
-    ChatRole, MessageId, ModelCallLogId, SessionId, TaskId, ToolCallId, WorkspaceId,
-};
+use seekcode_common::{ChatRole, ModelCallLogId, SessionId, TaskId, ToolCallId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -81,8 +79,8 @@ pub struct NewSession {
 /// Session message persisted locally.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionMessageRecord {
-    /// Message identifier.
-    pub id: MessageId,
+    /// Auto-incremented message row identifier.
+    pub id: i64,
     /// Parent session identifier.
     pub session_id: SessionId,
     /// Conversation turn sequence number within the session.
@@ -104,8 +102,6 @@ pub struct SessionMessageRecord {
 /// New session message data accepted by storage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewSessionMessage {
-    /// Message identifier.
-    pub id: MessageId,
     /// Parent session identifier.
     pub session_id: SessionId,
     /// Conversation turn sequence number within the session.

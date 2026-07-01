@@ -84,7 +84,6 @@ macro_rules! id_type {
 
 id_type!(SessionId);
 id_type!(TaskId);
-id_type!(MessageId);
 id_type!(ToolCallId);
 id_type!(WorkspaceId);
 id_type!(ModelCallLogId);
@@ -147,8 +146,6 @@ pub enum ChatRole {
 /// Basic chat message DTO shared by providers and storage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
-    /// Message identifier.
-    pub id: MessageId,
     /// Message role.
     pub role: ChatRole,
     /// Plain text content.
@@ -167,7 +164,6 @@ impl ChatMessage {
     /// Creates a new chat message with the current UTC timestamp.
     pub fn new(role: ChatRole, content: impl Into<String>) -> Self {
         Self {
-            id: MessageId::new(),
             role,
             content: content.into(),
             reasoning_content: None,
