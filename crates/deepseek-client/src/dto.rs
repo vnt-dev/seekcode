@@ -18,6 +18,19 @@ pub struct DeepSeekChatRequest {
     /// Streaming options used to request final usage frames.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<DeepSeekStreamOptions>,
+    /// Thinking mode toggle.
+    pub thinking: DeepSeekThinking,
+    /// Provider-specific reasoning intensity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+/// DeepSeek thinking mode request option.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeepSeekThinking {
+    /// Thinking mode state.
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 /// DeepSeek chat message DTO.

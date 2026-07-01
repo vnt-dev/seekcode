@@ -2,17 +2,21 @@
 
 use crate::dto::{
     DeepSeekChatRequest, DeepSeekChatResponse, DeepSeekMessage, DeepSeekStreamOptions,
+    DeepSeekThinking,
 };
 use crate::sse::parse_sse_frame_choices;
 use crate::tool_calls::{decode_deepseek_tool_call, decode_usage, encode_tool_specs};
+use crate::{ChatChunk, ChatRequest, ChatResponse, ChatStream, ModelProfile, ModelProvider};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::{self, BoxStream};
 use futures_util::StreamExt;
 use seekcode_common::{ChatRole, SeekCodeError, SeekCodeResult};
-use seekcode_model_provider::{ChatRequest, ChatResponse, ChatStream, ModelProfile, ModelProvider};
 use std::collections::VecDeque;
 use std::time::Duration;
+
+/// Default model context window in tokens when none is configured.
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Configuration for DeepSeek API access.
 #[derive(Clone, Debug)]
@@ -23,6 +27,8 @@ pub struct DeepSeekConfig {
     pub api_key: Option<String>,
     /// Default model used when the caller does not choose one.
     pub default_model: String,
+    /// Model context window in tokens, used for context-compression decisions.
+    pub context_window: u32,
     /// HTTP timeout for provider requests.
     pub timeout: Duration,
 }
@@ -33,6 +39,7 @@ impl Default for DeepSeekConfig {
             base_url: "https://api.deepseek.com".to_string(),
             api_key: None,
             default_model: "deepseek-v4-pro".to_string(),
+            context_window: DEFAULT_CONTEXT_WINDOW,
             timeout: Duration::from_secs(120),
         }
     }
@@ -109,6 +116,14 @@ impl DeepSeekClient {
             stream_options: stream.then_some(DeepSeekStreamOptions {
                 include_usage: true,
             }),
+            thinking: DeepSeekThinking {
+                kind: if request.thinking {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                },
+            },
+            reasoning_effort: request.thinking.then(|| request.reasoning_effort).flatten(),
         })
     }
 
@@ -116,6 +131,7 @@ impl DeepSeekClient {
         &self,
         request: DeepSeekChatRequest,
     ) -> SeekCodeResult<reqwest::Response> {
+        // tracing::debug!("Sending chat request: {:?}", request);
         let response = self
             .http
             .post(self.chat_completions_url())
@@ -170,7 +186,7 @@ impl ModelProvider for DeepSeekClient {
     async fn model_profile(&self, model: &str) -> SeekCodeResult<ModelProfile> {
         Ok(ModelProfile {
             id: model.to_string(),
-            context_window: 64_000,
+            context_window: self.config.context_window,
             supports_tools: true,
             supports_thinking: true,
         })
@@ -268,7 +284,7 @@ enum StreamState {
     Running {
         bytes: BoxStream<'static, Result<Bytes, reqwest::Error>>,
         buffer: String,
-        pending: VecDeque<seekcode_model_provider::ChatChunk>,
+        pending: VecDeque<ChatChunk>,
         done: bool,
     },
     Done,
@@ -276,10 +292,7 @@ enum StreamState {
 
 async fn next_stream_item(
     mut state: StreamState,
-) -> Option<(
-    SeekCodeResult<seekcode_model_provider::ChatChunk>,
-    StreamState,
-)> {
+) -> Option<(SeekCodeResult<ChatChunk>, StreamState)> {
     loop {
         match state {
             StreamState::Init {
@@ -329,7 +342,7 @@ async fn next_stream_item(
                         while let Some(frame) = take_next_sse_frame(&mut buffer) {
                             match frame_data(&frame) {
                                 Some(data) if data == "[DONE]" => {
-                                    pending.push_back(seekcode_model_provider::ChatChunk::Finished);
+                                    pending.push_back(ChatChunk::Finished);
                                     done = true;
                                 }
                                 Some(data) => match parse_sse_frame_choices(&data) {

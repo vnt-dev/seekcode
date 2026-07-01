@@ -7,6 +7,5 @@ license.workspace = true
 
 [dependencies]
 seekcode-common.workspace = true
-seekcode-workspace.workspace = true
 serde.workspace = true
 similar.workspace = true

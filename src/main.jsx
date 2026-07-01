@@ -9,15 +9,20 @@ import {
   Activity,
   Bot,
   Boxes,
+  Brain,
+  Check,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   CloudDownload,
   Code2,
+  Copy,
   GitBranch,
   Hammer,
   Loader2,
   MessageSquare,
   MessageSquarePlus,
+  PanelLeft,
   PanelRight,
   Play,
   Plus,
@@ -39,6 +44,12 @@ const DEFAULT_MODELS = [
 ];
 const DEFAULT_PROVIDER_ID = "default";
 const DEFAULT_PROVIDER_NAME = "默认供应商";
+const DEFAULT_REASONING_EFFORT = "high";
+const SESSION_MESSAGE_PAGE_TURNS = 20;
+const REASONING_EFFORTS = [
+  { id: "high", label: "High" },
+  { id: "max", label: "Max" },
+];
 
 const WORKSPACE_ITEMS = [
   { icon: Code2, label: "agent-core", value: "events, tasks, stream loop" },
@@ -58,6 +69,9 @@ function App() {
   const [workspacePromptOpen, setWorkspacePromptOpen] = useState(false);
   const [view, setView] = useState("chat");
   const [model, setModel] = useState(modelKey(DEFAULT_PROVIDER_ID, DEFAULT_MODELS[0].id));
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [thinkingEnabled, setThinkingEnabled] = useState(true);
+  const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_REASONING_EFFORT);
   const [prompt, setPrompt] = useState("");
   const [runningSessionIds, setRunningSessionIds] = useState(() => new Set());
   const [cancelingSessionIds, setCancelingSessionIds] = useState(() => new Set());
@@ -68,6 +82,7 @@ function App() {
     base_url: "https://api.deepseek.com",
     api_key: "",
     title_model: "deepseek-v4-flash",
+    context_window: "1M",
     models: DEFAULT_MODELS,
     providers: [],
   });
@@ -93,16 +108,23 @@ function App() {
   ]);
   const [timeline, setTimeline] = useState([]);
   const [selectedEventId, setSelectedEventId] = useState(null);
+  const [contextUsageBySession, setContextUsageBySession] = useState(() => new Map());
+  const [statsBySession, setStatsBySession] = useState(() => new Map());
+  const [panelCollapsed, setPanelCollapsed] = useState(true);
   const transcriptRef = useRef(null);
   const activeTaskIdRef = useRef(null);
   const activeSessionIdRef = useRef(null);
   const runningSessionIdsRef = useRef(new Set());
   const cancelingSessionIdsRef = useRef(new Set());
   const taskIdsBySessionRef = useRef(new Map());
+  const hiddenCompactionTaskIdsRef = useRef(new Set());
+  const messagePageStateRef = useRef(new Map());
+  const transcriptScrollModeRef = useRef({ type: "bottom", behavior: "auto" });
   const titleAnimationTimersRef = useRef(new Map());
   const directoryInputRef = useRef(null);
   const workspaceListRef = useRef(null);
   const workspaceDragRef = useRef(null);
+  const modelMenuRef = useRef(null);
   const suppressWorkspaceClickRef = useRef(false);
 
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
@@ -112,6 +134,18 @@ function App() {
   const activeSessionCanceling = activeSessionId ? cancelingSessionIds.has(activeSessionId) : false;
   const activeSessionTaskId = activeSessionId ? taskIdsBySession.get(activeSessionId) : null;
   const modelOptions = buildModelOptions(settings);
+  const selectedModelOption = resolveModelOptionByKey(model, modelOptions);
+  const modelContextWindow = parseContextWindow(settings.context_window);
+  const activeContextUsed = activeSessionId
+    ? contextUsageBySession.get(activeSessionId) ?? 0
+    : 0;
+  const activeContextPercent =
+    modelContextWindow > 0
+      ? Math.ceil((activeContextUsed / modelContextWindow) * 100)
+      : 0;
+  const activeSessionStats = activeSessionId
+    ? statsBySession.get(activeSessionId) ?? null
+    : null;
 
   useEffect(() => {
     activeTaskIdRef.current = activeTaskId;
@@ -130,7 +164,33 @@ function App() {
     const activeSession = findSessionById(workspaces, activeSessionId);
     const nextModel = resolveModelForSession(activeSession, modelOptions);
     if (model !== nextModel) setModel(nextModel);
+    if (activeSession) {
+      setThinkingEnabled(activeSession.thinkingEnabled);
+      setReasoningEffort(activeSession.reasoningEffort || DEFAULT_REASONING_EFFORT);
+    }
   }, [activeSessionId, model, settings.models, settings.providers, workspaces]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+
+    function closeModelMenu(event) {
+      if (modelMenuRef.current?.contains(event.target)) return;
+      setModelMenuOpen(false);
+    }
+
+    function closeModelMenuOnEscape(event) {
+      if (event.key === "Escape") setModelMenuOpen(false);
+    }
+
+    window.addEventListener("pointerdown", closeModelMenu);
+    window.addEventListener("keydown", closeModelMenuOnEscape);
+    window.addEventListener("scroll", closeModelMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeModelMenu);
+      window.removeEventListener("keydown", closeModelMenuOnEscape);
+      window.removeEventListener("scroll", closeModelMenu, true);
+    };
+  }, [modelMenuOpen]);
 
   useEffect(() => {
     let unlisten;
@@ -164,10 +224,20 @@ function App() {
   }, []);
 
   useEffect(() => {
-    transcriptRef.current?.scrollTo({
-      top: transcriptRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+
+    const mode = transcriptScrollModeRef.current;
+    if (mode?.type === "preserve") {
+      const delta = transcript.scrollHeight - mode.previousScrollHeight;
+      transcript.scrollTop = mode.previousScrollTop + delta;
+    } else {
+      transcript.scrollTo({
+        top: transcript.scrollHeight,
+        behavior: mode?.behavior ?? "smooth",
+      });
+    }
+    transcriptScrollModeRef.current = { type: "bottom", behavior: "smooth" };
   }, [messages, timeline.length]);
 
   useEffect(() => {
@@ -259,6 +329,59 @@ function App() {
     }
   }
 
+  // Records the latest input token count used by a session's context.
+  function setSessionContextUsage(sessionId, tokens) {
+    if (!sessionId) return;
+    const value = Number(tokens);
+    if (!Number.isFinite(value) || value < 0) return;
+    setContextUsageBySession((current) => {
+      if (current.get(sessionId) === value) return current;
+      const next = new Map(current);
+      next.set(sessionId, value);
+      return next;
+    });
+  }
+
+  // Stores aggregated model-call stats for a session's dashboard.
+  function setSessionStats(sessionId, stats) {
+    if (!sessionId || !stats) return;
+    setStatsBySession((current) => {
+      const next = new Map(current);
+      next.set(sessionId, stats);
+      return next;
+    });
+  }
+
+  function resetMessagePageState(sessionId) {
+    if (!sessionId) return;
+    messagePageStateRef.current.delete(sessionId);
+  }
+
+  function handleTranscriptScroll() {
+    const transcript = transcriptRef.current;
+    if (!transcript || transcript.scrollTop > 48) return;
+    if (transcript.scrollHeight <= transcript.clientHeight + 48) return;
+    loadOlderSessionMessages(activeSessionIdRef.current);
+  }
+
+  function showEmptyMessages(sessionId = null) {
+    if (sessionId) resetMessagePageState(sessionId);
+    else messagePageStateRef.current.clear();
+    transcriptScrollModeRef.current = { type: "bottom", behavior: "auto" };
+    setMessages([]);
+  }
+
+  // Loads aggregated model-call telemetry for the session dashboard.
+  async function loadSessionStats(sessionId) {
+    if (!sessionId) return;
+    try {
+      const stats = await invoke("session_model_call_stats", { sessionId });
+      setSessionStats(sessionId, stats);
+    } catch (error) {
+      console.warn("failed to load session stats", error);
+    }
+  }
+
   function updateAssistantMessage(mutator) {
     setMessages((items) => {
       const next = [...items];
@@ -340,6 +463,7 @@ function App() {
             name: payload.name,
             status: "running",
             arguments: payload.arguments,
+            display: payload.display,
           });
         });
         break;
@@ -363,6 +487,10 @@ function App() {
         });
         break;
       case "model_round_finished":
+        if (payload.usage) {
+          setSessionContextUsage(payload.session_id, payload.usage.prompt_tokens);
+        }
+        loadSessionStats(payload.session_id);
         appendTimeline(
           "model",
           `Round ${payload.round_id} finished`,
@@ -375,12 +503,14 @@ function App() {
         setSessionRunning(payload.session_id, false);
         setSessionCanceling(payload.session_id, false);
         setSessionTask(payload.session_id, null);
+        loadSessionStats(payload.session_id);
         appendTimeline("task", "Task finished", payload.task_id, payload, "success");
         break;
       case "failed":
         setSessionRunning(payload.session_id, false);
         setSessionCanceling(payload.session_id, false);
         setSessionTask(payload.session_id, null);
+        hideCompactionDivider(payload.task_id);
         appendTimeline("task", "Task failed", payload.error, payload, "danger");
         setModelError(String(payload.error ?? "Model call failed"));
         removeEmptyAssistantPlaceholder();
@@ -389,7 +519,26 @@ function App() {
         setSessionRunning(payload.session_id, false);
         setSessionCanceling(payload.session_id, false);
         setSessionTask(payload.session_id, null);
+        hideCompactionDivider(payload.task_id);
         appendTimeline("task", "Task canceled", payload.task_id, payload, "danger");
+        break;
+      case "context_compaction_started":
+        upsertCompactionDivider("running", payload);
+        appendTimeline("compaction", "正在压缩上下文", "", payload, "active");
+        break;
+      case "context_compaction_canceled":
+        hideCompactionDivider(payload.task_id);
+        appendTimeline("compaction", "上下文压缩已取消", "", payload, "neutral");
+        break;
+      case "context_compaction_finished":
+        upsertCompactionDivider("done", payload);
+        appendTimeline(
+          "compaction",
+          "已压缩上下文",
+          `已压缩 ${payload.compacted_rounds} 轮，摘要 ${payload.summary_chars} 字`,
+          payload,
+          "success",
+        );
         break;
       default:
         appendTimeline("event", type, "", payload);
@@ -423,20 +572,24 @@ function App() {
       return;
     }
     const currentSession = findSessionById(workspaces, sessionId);
-    if (!sessionUsesModelOption(currentSession, selectedModel)) {
+    if (
+      !sessionUsesModelConfig(
+        currentSession,
+        selectedModel,
+        thinkingEnabled,
+        reasoningEffort,
+      )
+    ) {
       try {
         const saved = await invoke("update_session_model", {
           sessionId,
           modelProvider: selectedModel.providerId,
           model: selectedModel.modelId,
+          thinkingEnabled,
+          reasoningEffort,
         });
         const mappedSession = mapSessionRecord(saved);
-        setSessionModel(
-          mappedSession.id,
-          mappedSession.modelProvider,
-          mappedSession.model,
-          mappedSession.updated,
-        );
+        setSessionModel(mappedSession.id, mappedSession);
       } catch (error) {
         appendTimeline("task", "Start failed", String(error), { error }, "danger");
         setModelError(String(error));
@@ -474,6 +627,8 @@ function App() {
           session_id: sessionId,
           prompt: text,
           model: selectedModel.modelId,
+          thinking: thinkingEnabled,
+          reasoning_effort: reasoningEffort,
         },
       });
       setSessionTask(sessionId, task.id);
@@ -501,8 +656,10 @@ function App() {
     setSessionCanceling(sessionId, true);
     try {
       await invoke("cancel_agent_task", { taskId });
+      hideCompactionDivider(taskId);
     } catch (error) {
       setSessionCanceling(sessionId, false);
+      hiddenCompactionTaskIdsRef.current.delete(taskId);
       appendTimeline("task", "Cancel failed", String(error), { error }, "danger");
       setModelError(String(error));
     }
@@ -516,6 +673,65 @@ function App() {
         next.pop();
       }
       return next;
+    });
+  }
+
+  function upsertCompactionDivider(status, payload) {
+    const taskId = payload?.task_id ?? activeTaskIdRef.current;
+    if (!taskId) return;
+    if (status === "done") {
+      hiddenCompactionTaskIdsRef.current.delete(taskId);
+    } else if (hiddenCompactionTaskIdsRef.current.has(taskId)) {
+      return;
+    }
+
+    setMessages((items) => {
+      const next = [...items];
+      const existingIndex = next.findIndex(
+        (message) => message.role === "compaction" && message.taskId === taskId,
+      );
+      const divider = {
+        id: existingIndex >= 0 ? next[existingIndex].id : `compaction-${taskId}`,
+        role: "compaction",
+        taskId,
+        status,
+        summaryChars: payload?.summary_chars,
+      };
+
+      if (existingIndex >= 0) {
+        next[existingIndex] = { ...next[existingIndex], ...divider };
+        return next;
+      }
+
+      const placeholderIndex = next.findIndex(
+        (message, index) =>
+          index === next.length - 1 &&
+          message.role === "assistant" &&
+          (!message.taskId || message.taskId === taskId) &&
+          isAssistantMessageEmpty(message),
+      );
+      if (placeholderIndex >= 0) {
+        next[placeholderIndex] = { ...next[placeholderIndex], taskId };
+        next.splice(placeholderIndex, 0, divider);
+      } else {
+        next.push(divider);
+      }
+      return next;
+    });
+  }
+
+  function hideCompactionDivider(taskId) {
+    if (!taskId) return;
+    setMessages((items) => {
+      const divider = items.find(
+        (message) => message.role === "compaction" && message.taskId === taskId,
+      );
+      if (divider?.status === "done") return items;
+
+      hiddenCompactionTaskIdsRef.current.add(taskId);
+      return items.filter(
+        (message) => message.role !== "compaction" || message.taskId !== taskId,
+      );
     });
   }
 
@@ -541,7 +757,7 @@ function App() {
       activeSessionIdRef.current = nextSession?.id ?? null;
       setModel(resolveModelForSession(nextSession, modelOptions));
       if (nextSession) await loadSessionMessages(nextSession.id);
-      else setMessages([]);
+      else showEmptyMessages();
     } catch (error) {
       setModelError(String(error));
     }
@@ -561,7 +777,7 @@ function App() {
       setModelError(null);
       setTimeline([]);
       setSelectedEventId(null);
-      setMessages([]);
+      showEmptyMessages(sessionId);
     } catch (error) {
       setModelError(String(error));
     }
@@ -612,7 +828,7 @@ function App() {
     );
   }
 
-  function setSessionModel(sessionId, nextProvider, nextModel, nextUpdated) {
+  function setSessionModel(sessionId, patch) {
     setWorkspaces((items) =>
       items.map((workspace) => ({
         ...workspace,
@@ -620,9 +836,7 @@ function App() {
           session.id === sessionId
             ? {
                 ...session,
-                modelProvider: nextProvider,
-                model: nextModel,
-                ...(nextUpdated ? { updated: nextUpdated } : {}),
+                ...patch,
               }
             : session,
         ),
@@ -635,23 +849,62 @@ function App() {
     if (!selected) return;
 
     setModel(selected.key);
+    setModelMenuOpen(false);
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
 
-    setSessionModel(sessionId, selected.providerId, selected.modelId);
+    setSessionModel(sessionId, {
+      modelProvider: selected.providerId,
+      model: selected.modelId,
+      thinkingEnabled,
+      reasoningEffort,
+    });
     try {
       const saved = await invoke("update_session_model", {
         sessionId,
         modelProvider: selected.providerId,
         model: selected.modelId,
+        thinkingEnabled,
+        reasoningEffort,
       });
       const mappedSession = mapSessionRecord(saved);
-      setSessionModel(
-        mappedSession.id,
-        mappedSession.modelProvider,
-        mappedSession.model,
-        mappedSession.updated,
-      );
+      setSessionModel(mappedSession.id, mappedSession);
+    } catch (error) {
+      setModelError(String(error));
+    }
+  }
+
+  async function changeThinkingEnabled(nextThinkingEnabled) {
+    setThinkingEnabled(nextThinkingEnabled);
+    await saveActiveModelConfig({ thinking: nextThinkingEnabled });
+  }
+
+  async function changeReasoningEffort(nextReasoningEffort) {
+    setReasoningEffort(nextReasoningEffort);
+    await saveActiveModelConfig({ effort: nextReasoningEffort });
+  }
+
+  async function saveActiveModelConfig({ thinking = thinkingEnabled, effort = reasoningEffort } = {}) {
+    const sessionId = activeSessionIdRef.current;
+    const selected = resolveModelOptionByKey(model, modelOptions);
+    if (!sessionId || !selected) return;
+
+    setSessionModel(sessionId, {
+      modelProvider: selected.providerId,
+      model: selected.modelId,
+      thinkingEnabled: thinking,
+      reasoningEffort: effort,
+    });
+    try {
+      const saved = await invoke("update_session_model", {
+        sessionId,
+        modelProvider: selected.providerId,
+        model: selected.modelId,
+        thinkingEnabled: thinking,
+        reasoningEffort: effort,
+      });
+      const mappedSession = mapSessionRecord(saved);
+      setSessionModel(mappedSession.id, mappedSession);
     } catch (error) {
       setModelError(String(error));
     }
@@ -672,8 +925,8 @@ function App() {
         name,
         model_provider: selected.providerId,
         model: selected.modelId,
-        thinking_enabled: true,
-        reasoning_effort: null,
+        thinking_enabled: thinkingEnabled,
+        reasoning_effort: reasoningEffort,
       },
     });
     const mappedSession = mapSessionRecord(session);
@@ -733,7 +986,7 @@ function App() {
       setTimeline([]);
       setSelectedEventId(null);
       if (openedWorkspace.sessions[0]) await loadSessionMessages(openedWorkspace.sessions[0].id);
-      else setMessages([]);
+      else showEmptyMessages();
     } catch (error) {
       setModelError(String(error));
     }
@@ -858,7 +1111,7 @@ function App() {
       setActiveSessionId(nextWorkspace?.sessions[0]?.id ?? null);
       setDraftSession(null);
       if (nextWorkspace?.sessions[0]) loadSessionMessages(nextWorkspace.sessions[0].id);
-      else setMessages([]);
+      else showEmptyMessages();
     }
   }
 
@@ -899,7 +1152,7 @@ function App() {
       activeSessionIdRef.current = null;
       setDraftSession(null);
       setModel(resolveModelForSession(null, modelOptions));
-      setMessages([]);
+      showEmptyMessages();
     }
   }
 
@@ -930,7 +1183,7 @@ function App() {
       setDraftSession(null);
       setModel(resolveModelForSession(remainingSessions[0], modelOptions));
       if (remainingSessions[0]) loadSessionMessages(remainingSessions[0].id);
-      else setMessages([]);
+      else showEmptyMessages(sessionId);
     }
   }
 
@@ -960,15 +1213,67 @@ function App() {
     setTimeline([]);
     setSelectedEventId(null);
     if (workspace.sessions[0]) await loadSessionMessages(workspace.sessions[0].id);
-    else setMessages([]);
+    else showEmptyMessages();
   }
 
   async function loadSessionMessages(sessionId) {
     try {
-      const records = await invoke("list_session_messages", { sessionId });
+      const records = await invoke("list_session_messages", {
+        sessionId,
+        turnLimit: SESSION_MESSAGE_PAGE_TURNS,
+      });
+      if (activeSessionIdRef.current !== sessionId) return;
+      messagePageStateRef.current.set(sessionId, messagePageStateFromRecords(records));
+      transcriptScrollModeRef.current = { type: "bottom", behavior: "auto" };
       setMessages(mapMessageRecords(records));
+      loadSessionContextUsage(sessionId);
+      loadSessionStats(sessionId);
     } catch (error) {
       setModelError(String(error));
+    }
+  }
+
+  async function loadOlderSessionMessages(sessionId) {
+    if (!sessionId) return;
+    const pageState = messagePageStateRef.current.get(sessionId);
+    if (!pageState?.hasMore || pageState.loading || pageState.earliestTurn == null) return;
+
+    messagePageStateRef.current.set(sessionId, { ...pageState, loading: true });
+    const transcript = transcriptRef.current;
+    const previousScrollHeight = transcript?.scrollHeight ?? 0;
+    const previousScrollTop = transcript?.scrollTop ?? 0;
+
+    try {
+      const records = await invoke("list_session_messages", {
+        sessionId,
+        beforeTurnSequence: pageState.earliestTurn,
+        turnLimit: SESSION_MESSAGE_PAGE_TURNS,
+      });
+      const nextPageState = messagePageStateFromRecords(records, pageState.earliestTurn);
+      messagePageStateRef.current.set(sessionId, nextPageState);
+      if (activeSessionIdRef.current !== sessionId || records.length === 0) return;
+
+      transcriptScrollModeRef.current = {
+        type: "preserve",
+        previousScrollHeight,
+        previousScrollTop,
+      };
+      setMessages((items) => [...mapMessageRecords(records), ...items]);
+    } catch (error) {
+      messagePageStateRef.current.set(sessionId, { ...pageState, loading: false });
+      setModelError(String(error));
+    }
+  }
+
+  // Loads the persisted input-token watermark so the usage indicator is
+  // populated even before a new round runs in the reopened session.
+  async function loadSessionContextUsage(sessionId) {
+    try {
+      const tokens = await invoke("session_context_usage", { sessionId });
+      setSessionContextUsage(sessionId, tokens);
+    } catch (error) {
+      // Non-fatal: the indicator simply stays at its previous value.
+      console.warn("failed to load session context usage", error);
     }
   }
 
@@ -1008,7 +1313,11 @@ function App() {
   }
 
   return (
-    <div className={`app-shell ${view === "settings" ? "is-settings-view" : ""}`}>
+    <div
+      className={`app-shell ${view === "settings" ? "is-settings-view" : ""} ${
+        panelCollapsed ? "is-panel-collapsed" : ""
+      }`}
+    >
       {view !== "settings" ? (
       <aside className="sidebar">
         <button className="new-chat-button" type="button" onClick={openDirectoryPicker}>
@@ -1213,7 +1522,7 @@ function App() {
       ) : (
         <>
           <main className="conversation">
-            <section className="transcript" ref={transcriptRef}>
+            <section className="transcript" ref={transcriptRef} onScroll={handleTranscriptScroll}>
               {messages.map((message) => (
                 <MessageBubble key={message.id} message={message} />
               ))}
@@ -1259,13 +1568,79 @@ function App() {
                     <span>Ctrl + Enter to send</span>
                   </div>
                   <div className="composer-actions">
-                    <select value={model} onChange={(event) => changeModel(event.target.value)}>
-                      {modelOptions.map((item) => (
-                        <option key={item.key} value={item.key}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
+                    <span
+                      className="context-usage"
+                      title={`已用 ${activeContextUsed} / 上下文 ${modelContextWindow} tokens（${activeContextPercent}%）`}
+                    >
+                      {formatContextTokens(activeContextUsed)}/{formatContextTokens(modelContextWindow)} ({activeContextPercent}%)
+                    </span>
+                    <div className="model-picker" ref={modelMenuRef}>
+                      <button
+                        className="model-trigger"
+                        type="button"
+                        aria-haspopup="menu"
+                        aria-expanded={modelMenuOpen}
+                        onClick={() => setModelMenuOpen((open) => !open)}
+                      >
+                        <span>{selectedModelOption?.label ?? "选择模型"}</span>
+                        <ChevronDown size={14} />
+                      </button>
+                      {modelMenuOpen ? (
+                        <div className="model-popover" role="menu">
+                          <div className="model-popover-title">Models</div>
+                          <div className="model-list">
+                            {modelOptions.map((item, index) => (
+                              <button
+                                className={`model-option ${item.key === model ? "is-selected" : ""}`}
+                                key={item.key}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={item.key === model}
+                                onClick={() => changeModel(item.key)}
+                              >
+                                <span>{item.label}</span>
+                                {item.key === model ? <Check size={15} /> : <small>{index + 1}</small>}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="model-popover-divider" />
+                          <div className="model-setting-row">
+                            <div>
+                              <span>思考模式</span>
+                              <small>{`thinking: ${thinkingEnabled ? "enabled" : "disabled"}`}</small>
+                            </div>
+                            <button
+                              className={`switch-button ${thinkingEnabled ? "is-on" : ""}`}
+                              type="button"
+                              role="switch"
+                              aria-checked={thinkingEnabled}
+                              onClick={() => changeThinkingEnabled(!thinkingEnabled)}
+                            >
+                              <span />
+                            </button>
+                          </div>
+                          <div className="model-setting-block">
+                            <div className="model-setting-heading">
+                              <Brain size={14} />
+                              <span>思考强度</span>
+                            </div>
+                            <div className="effort-segments" aria-disabled={!thinkingEnabled}>
+                              {REASONING_EFFORTS.map((item) => (
+                                <button
+                                  className={reasoningEffort === item.id ? "is-selected" : ""}
+                                  key={item.id}
+                                  type="button"
+                                  disabled={!thinkingEnabled}
+                                  onClick={() => changeReasoningEffort(item.id)}
+                                >
+                                  {item.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                     <button
                       className="send-button"
                       type={activeSessionRunning ? "button" : "submit"}
@@ -1299,7 +1674,11 @@ function App() {
             </div>
           </main>
 
-          <WorkspacePanel activeWorkspace={activeWorkspace} timeline={timeline} selectedEvent={selectedEvent} selectedEventId={selectedEventId} setSelectedEventId={setSelectedEventId} />
+          <WorkspacePanel
+            stats={activeSessionStats}
+            collapsed={panelCollapsed}
+            onToggle={() => setPanelCollapsed((value) => !value)}
+          />
         </>
       )}
 
@@ -1339,60 +1718,70 @@ function App() {
   );
 }
 
-function WorkspacePanel({ activeWorkspace, timeline, selectedEvent, selectedEventId, setSelectedEventId }) {
+function WorkspacePanel({ stats, collapsed, onToggle }) {
+  if (collapsed) {
+    return (
+      <aside className="workspace is-collapsed">
+        <button
+          className="workspace-toggle"
+          type="button"
+          onClick={onToggle}
+          title="展开会话统计"
+          aria-label="展开会话统计"
+        >
+          <PanelLeft size={18} />
+        </button>
+      </aside>
+    );
+  }
+
+  const callCount = Number(stats?.call_count ?? 0);
+  const inputTokens = Number(stats?.input_tokens ?? 0);
+  const outputTokens = Number(stats?.output_tokens ?? 0);
+  const cacheHitTokens = Number(stats?.cache_hit_tokens ?? 0);
+  const cacheHitRate = inputTokens > 0 ? (cacheHitTokens / inputTokens) * 100 : 0;
+
   return (
     <aside className="workspace">
       <header className="workspace-header">
         <div>
-          <span>Workspace</span>
-          <strong>{activeWorkspace?.name}</strong>
+          <span>会话统计</span>
+          <strong>模型调用</strong>
         </div>
-        <PanelRight size={18} />
+        <button
+          className="workspace-toggle"
+          type="button"
+          onClick={onToggle}
+          title="收起会话统计"
+          aria-label="收起会话统计"
+        >
+          <PanelRight size={18} />
+        </button>
       </header>
 
       <section className="workspace-section">
-        <div className="section-title">Structure</div>
-        <div className="workspace-items">
-          {WORKSPACE_ITEMS.map((item) => (
-            <WorkspaceItem item={item} key={item.label} />
-          ))}
+        <div className="stat-list">
+          <div className="stat-row">
+            <span>调用总次数</span>
+            <strong>{callCount.toLocaleString()}</strong>
+          </div>
+          <div className="stat-row">
+            <span>输入 token 总数</span>
+            <strong>{inputTokens.toLocaleString()}</strong>
+          </div>
+          <div className="stat-row">
+            <span>输出 token 总数</span>
+            <strong>{outputTokens.toLocaleString()}</strong>
+          </div>
+          <div className="stat-row">
+            <span>缓存命中总数</span>
+            <strong>{cacheHitTokens.toLocaleString()}</strong>
+          </div>
+          <div className="stat-row">
+            <span>缓存命中率</span>
+            <strong>{cacheHitRate.toFixed(1)}%</strong>
+          </div>
         </div>
-      </section>
-
-      <section className="workspace-section timeline-section">
-        <div className="section-title">Run Timeline</div>
-        <div className="timeline">
-          {timeline.length === 0 ? (
-            <div className="empty-state">
-              <Activity size={22} />
-              <span>Model output, reasoning, and tool calls appear here</span>
-            </div>
-          ) : (
-            timeline.map((item) => (
-              <button
-                key={item.id}
-                className={`timeline-item tone-${item.tone} ${selectedEventId === item.id ? "is-selected" : ""}`}
-                onClick={() => setSelectedEventId(item.id)}
-              >
-                <EventIcon type={item.type} tone={item.tone} />
-                <div>
-                  <strong>{item.title}</strong>
-                  <span>{item.detail}</span>
-                </div>
-                <time>{item.time}</time>
-              </button>
-            ))
-          )}
-        </div>
-      </section>
-
-      <section className="workspace-section detail-section">
-        <div className="section-title">Event Detail</div>
-        {selectedEvent ? (
-          <pre>{JSON.stringify(selectedEvent.payload, null, 2)}</pre>
-        ) : (
-          <div className="empty-detail">Select a timeline event</div>
-        )}
       </section>
     </aside>
   );
@@ -1479,6 +1868,18 @@ function SettingsView({
                 }
                 placeholder="deepseek-v4-flash"
               />
+            </label>
+
+            <label className="field">
+              <span>模型上下文大小</span>
+              <input
+                value={settings.context_window}
+                onChange={(event) =>
+                  setSettings((current) => ({ ...current, context_window: event.target.value }))
+                }
+                placeholder="1M"
+              />
+              <small className="field-hint">支持 k / M 单位（忽略大小写），例如 1M、500k、64000</small>
             </label>
 
             <ModelCollectionEditor
@@ -1717,6 +2118,26 @@ function WorkspaceItem({ item }) {
 }
 
 function MessageBubble({ message }) {
+  if (message.role === "compaction") {
+    const isDone = message.status === "done";
+    const sizeLabel =
+      isDone && Number.isFinite(Number(message.summaryChars))
+        ? `摘要 ${formatCompactNumber(message.summaryChars)} 字`
+        : "";
+    return (
+      <div className={`compaction-divider ${isDone ? "is-done" : "is-running"}`}>
+        <span className="compaction-divider-line" />
+        <span className="compaction-divider-label">
+          <span className="compaction-divider-text">
+            {isDone ? "已压缩上下文" : "正在压缩上下文"}
+          </span>
+          {sizeLabel ? <span className="compaction-divider-size">{sizeLabel}</span> : null}
+        </span>
+        <span className="compaction-divider-line" />
+      </div>
+    );
+  }
+
   const isUser = message.role === "user";
   const blocks = isUser ? [] : getAssistantBlocks(message);
   return (
@@ -1738,18 +2159,7 @@ function MessageBubble({ message }) {
               }
 
               if (block.type === "tool") {
-                const tool = block.tool;
-                return (
-                  <div className="tool-strip message-block" key={block.id}>
-                    <div className={`tool-chip is-${tool.status}`}>
-                      <Hammer size={14} />
-                      <span>{tool.name || "tool"}</span>
-                      {tool.status === "running" ? <Loader2 size={13} /> : null}
-                      {tool.status === "done" ? <CheckCircle2 size={13} /> : null}
-                      {tool.status === "failed" ? <XCircle size={13} /> : null}
-                    </div>
-                  </div>
-                );
+                return <ToolCallBlock key={block.id} tool={block.tool} />;
               }
 
               return (
@@ -1761,6 +2171,81 @@ function MessageBubble({ message }) {
           : null}
       </div>
     </article>
+  );
+}
+
+function ToolCallBlock({ tool }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const display = toolDisplayInfo(tool);
+  const expandable = Boolean(display);
+
+  function toggleExpanded() {
+    if (!expandable) return;
+    setExpanded((value) => !value);
+  }
+
+  function handleKeyDown(event) {
+    if (!expandable) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggleExpanded();
+  }
+
+  async function copyCommand(event) {
+    event.stopPropagation();
+    if (!display?.detail) return;
+    await navigator.clipboard?.writeText(display.detail);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  return (
+    <div
+      className={`tool-strip message-block ${expandable ? "is-expandable" : ""} ${expanded ? "is-expanded" : ""}`}
+    >
+      <div
+        className="tool-strip-head"
+        onClick={toggleExpanded}
+        onKeyDown={handleKeyDown}
+        role={expandable ? "button" : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        aria-expanded={expandable ? expanded : undefined}
+      >
+        <div className={`tool-chip is-${tool.status}`}>
+          <Hammer size={14} />
+          <span>{tool.name || "tool"}</span>
+          {tool.status === "running" ? <Loader2 size={13} /> : null}
+          {tool.status === "done" ? <CheckCircle2 size={13} /> : null}
+          {tool.status === "failed" ? <XCircle size={13} /> : null}
+        </div>
+        {display?.preview ? (
+          <code className="tool-command-line" title={display.preview}>
+            {display.preview}
+          </code>
+        ) : null}
+      </div>
+
+      {expanded && display ? (
+        <div className="tool-command-panel">
+          <div className="tool-command-panel-bar">
+            <span>{display.title}</span>
+            <button
+              className="tool-command-copy"
+              type="button"
+              title="复制内容"
+              aria-label="复制内容"
+              onClick={copyCommand}
+            >
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          </div>
+          <pre>
+            <code>{display.detail}</code>
+          </pre>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1792,6 +2277,43 @@ function mapWorkspaceBundle(bundle) {
   };
 }
 
+// Parses a context window expression like "1M", "500k", or "64000" into tokens.
+function parseContextWindow(raw) {
+  const text = String(raw ?? "").trim().toLowerCase();
+  if (!text) return 1_000_000;
+  let multiplier = 1;
+  let numberPart = text;
+  if (text.endsWith("k")) {
+    multiplier = 1_000;
+    numberPart = text.slice(0, -1);
+  } else if (text.endsWith("m")) {
+    multiplier = 1_000_000;
+    numberPart = text.slice(0, -1);
+  }
+  const value = Number.parseFloat(numberPart.trim());
+  if (!Number.isFinite(value) || value <= 0) return 1_000_000;
+  return Math.round(value * multiplier);
+}
+
+// Formats a token count with a k/M unit, one decimal, rounded up.
+// A positive value below 0.1k is shown as 0.1k.
+function formatContextTokens(tokens) {
+  const value = Math.max(0, Number(tokens) || 0);
+  if (value >= 1_000_000) {
+    const millions = Math.ceil((value / 1_000_000) * 10) / 10;
+    return `${millions.toFixed(1)}M`;
+  }
+  const thousands = Math.ceil((value / 1_000) * 10) / 10;
+  return `${thousands.toFixed(1)}k`;
+}
+
+function formatCompactNumber(value) {
+  const number = Math.max(0, Number(value) || 0);
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`;
+  if (number >= 1_000) return `${(number / 1_000).toFixed(1)}k`;
+  return String(Math.round(number));
+}
+
 function mapSessionRecord(session) {
   return {
     id: session.id,
@@ -1799,6 +2321,8 @@ function mapSessionRecord(session) {
     updated: shortDateTime(session.updated_at),
     model: session.model,
     modelProvider: session.model_provider,
+    thinkingEnabled: session.thinking_enabled ?? true,
+    reasoningEffort: session.reasoning_effort || DEFAULT_REASONING_EFFORT,
   };
 }
 
@@ -1807,6 +2331,7 @@ function mapLoadedSettings(settings) {
     base_url: settings?.base_url ?? "https://api.deepseek.com",
     api_key: settings?.api_key ?? "",
     title_model: settings?.title_model ?? "deepseek-v4-flash",
+    context_window: settings?.context_window ?? "1M",
     models: normalizeModelOptions(settings?.models),
     providers: normalizeAdditionalProviders(settings?.providers),
   };
@@ -1922,10 +2447,13 @@ function resolveModelForSession(session, modelOptions) {
   return match?.key ?? options[0].key;
 }
 
-function sessionUsesModelOption(session, option) {
+function sessionUsesModelConfig(session, option, thinkingEnabled, reasoningEffort) {
   return (
     String(session?.modelProvider ?? "").trim() === option.providerId &&
-    String(session?.model ?? "").trim() === option.modelId
+    String(session?.model ?? "").trim() === option.modelId &&
+    Boolean(session?.thinkingEnabled) === Boolean(thinkingEnabled) &&
+    String(session?.reasoningEffort || DEFAULT_REASONING_EFFORT) ===
+      String(reasoningEffort || DEFAULT_REASONING_EFFORT)
   );
 }
 
@@ -2030,6 +2558,25 @@ function mapMessageRecords(records) {
     .flatMap(([, turn]) => [...turn.users, turn.assistant].filter(Boolean));
 }
 
+function messagePageStateFromRecords(records, fallbackEarliestTurn = null) {
+  const turns = messageRecordTurnSequences(records);
+  return {
+    earliestTurn: turns[0] ?? fallbackEarliestTurn,
+    hasMore: turns.length >= SESSION_MESSAGE_PAGE_TURNS,
+    loading: false,
+  };
+}
+
+function messageRecordTurnSequences(records) {
+  return Array.from(
+    new Set(
+      (records ?? [])
+        .map((record) => Number(record.turn_sequence))
+        .filter((turnSequence) => Number.isFinite(turnSequence)),
+    ),
+  ).sort((left, right) => left - right);
+}
+
 function applyToolCallDeltas(message, toolCalls) {
   for (const call of toolCalls) {
     const id = call.id;
@@ -2086,6 +2633,7 @@ function upsertToolCallBlock(message, patch) {
       name: "",
       status: "running",
       arguments: "",
+      display: null,
     };
     message.events.push(item);
   }
@@ -2098,6 +2646,7 @@ function upsertToolCallBlock(message, patch) {
   if (patch.argumentsDelta) {
     item.arguments = `${item.arguments ?? ""}${patch.argumentsDelta}`;
   }
+  if (Object.prototype.hasOwnProperty.call(patch, "display")) item.display = patch.display;
   if (Object.prototype.hasOwnProperty.call(patch, "summary")) item.summary = patch.summary;
   if (Object.prototype.hasOwnProperty.call(patch, "output")) item.output = patch.output;
   if (Object.prototype.hasOwnProperty.call(patch, "error")) item.error = patch.error;
@@ -2123,6 +2672,18 @@ function getAssistantBlocks(message) {
     if (block.type === "tool") return Boolean(block.tool);
     return Boolean(block.text);
   });
+}
+
+function toolDisplayInfo(tool) {
+  const display = tool?.display;
+  if (!display || typeof display !== "object") return null;
+
+  const title = String(display.title ?? "").trim() || "Details";
+  const preview = String(display.preview ?? "").trim();
+  const detail = String(display.detail ?? "");
+  if (!preview || !detail) return null;
+
+  return { title, preview, detail };
 }
 
 function ensureAssistantBlocks(message) {

@@ -1,18 +1,25 @@
 use crate::models::{
     AuditLogRecord, ModelCallLogRecord, NewModelCallLog, NewSession, NewSessionMessage,
-    NewWorkspace, SessionMessageRecord, SessionRecord, WorkspaceRecord,
+    NewWorkspace, SessionContextStateRecord, SessionMessageRecord, SessionModelCallStats,
+    SessionRecord, WorkspaceRecord,
 };
 use async_trait::async_trait;
 use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, WorkspaceId};
 
 /// Root storage service marker.
 pub trait Storage:
-    WorkspaceStore + SessionStore + ModelCallLogStore + AuditStore + Send + Sync
+    WorkspaceStore + SessionStore + SessionContextStore + ModelCallLogStore + AuditStore + Send + Sync
 {
 }
 
 impl<T> Storage for T where
-    T: WorkspaceStore + SessionStore + ModelCallLogStore + AuditStore + Send + Sync
+    T: WorkspaceStore
+        + SessionStore
+        + SessionContextStore
+        + ModelCallLogStore
+        + AuditStore
+        + Send
+        + Sync
 {
 }
 
@@ -67,6 +74,8 @@ pub trait SessionStore {
         session_id: SessionId,
         model_provider: String,
         model: String,
+        thinking_enabled: bool,
+        reasoning_effort: Option<String>,
     ) -> SeekCodeResult<SessionRecord>;
 
     /// Lists known sessions.
@@ -96,6 +105,22 @@ pub trait SessionStore {
         session_id: SessionId,
     ) -> SeekCodeResult<Vec<SessionMessageRecord>>;
 
+    /// Lists messages in a turn range for one session.
+    async fn list_session_messages_in_turn_range(
+        &self,
+        session_id: SessionId,
+        after_turn_sequence: i64,
+        before_turn_sequence: Option<i64>,
+    ) -> SeekCodeResult<Vec<SessionMessageRecord>>;
+
+    /// Lists the most recent message turns before an optional turn boundary.
+    async fn list_session_messages_page(
+        &self,
+        session_id: SessionId,
+        before_turn_sequence: Option<i64>,
+        turn_limit: i64,
+    ) -> SeekCodeResult<Vec<SessionMessageRecord>>;
+
     /// Returns the next conversation turn sequence number.
     async fn next_session_turn_sequence(&self, session_id: SessionId) -> SeekCodeResult<i64>;
 
@@ -104,6 +129,31 @@ pub trait SessionStore {
         &self,
         session_id: SessionId,
         message: ChatMessage,
+    ) -> SeekCodeResult<()>;
+
+    /// Updates the most recent model input token count for a session.
+    async fn update_session_last_input_tokens(
+        &self,
+        session_id: SessionId,
+        last_input_tokens: i64,
+    ) -> SeekCodeResult<()>;
+}
+
+/// Per-session context compression state persistence API.
+#[async_trait]
+pub trait SessionContextStore {
+    /// Reads the compression state for one session, if any exists.
+    async fn get_session_context_state(
+        &self,
+        session_id: SessionId,
+    ) -> SeekCodeResult<Option<SessionContextStateRecord>>;
+
+    /// Inserts one compression summary and position snapshot.
+    async fn save_session_compaction(
+        &self,
+        session_id: SessionId,
+        summary: String,
+        compacted_through_turn: i64,
     ) -> SeekCodeResult<()>;
 }
 
@@ -115,6 +165,12 @@ pub trait ModelCallLogStore {
         &self,
         log: NewModelCallLog,
     ) -> SeekCodeResult<ModelCallLogRecord>;
+
+    /// Aggregates model call telemetry for one session.
+    async fn session_model_call_stats(
+        &self,
+        session_id: SessionId,
+    ) -> SeekCodeResult<SessionModelCallStats>;
 }
 
 /// Audit persistence API.

@@ -2,17 +2,14 @@
 members = [
   "src-tauri",
   "crates/common",
-  "crates/model-provider",
   "crates/deepseek-client",
   "crates/agent-core",
   "crates/tool-system",
-  "crates/workspace",
   "crates/patch-engine",
   "crates/shell-sandbox",
   "crates/policy",
   "crates/storage",
   "crates/secrets",
-  "crates/telemetry",
   "crates/app-kernel",
   "crates/mcp-client",
   "crates/evals",
@@ -58,12 +55,9 @@ seekcode-common = { path = "crates/common" }
 seekcode-deepseek-client = { path = "crates/deepseek-client" }
 seekcode-evals = { path = "crates/evals" }
 seekcode-mcp-client = { path = "crates/mcp-client" }
-seekcode-model-provider = { path = "crates/model-provider" }
 seekcode-patch-engine = { path = "crates/patch-engine" }
 seekcode-policy = { path = "crates/policy" }
 seekcode-secrets = { path = "crates/secrets" }
 seekcode-shell-sandbox = { path = "crates/shell-sandbox" }
 seekcode-storage = { path = "crates/storage" }
-seekcode-telemetry = { path = "crates/telemetry" }
 seekcode-tool-system = { path = "crates/tool-system" }
-seekcode-workspace = { path = "crates/workspace" }

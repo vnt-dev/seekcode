@@ -51,6 +51,8 @@ pub struct SessionRecord {
     pub thinking_enabled: bool,
     /// Optional provider-specific reasoning intensity.
     pub reasoning_effort: Option<String>,
+    /// Most recent model input token count observed for the session.
+    pub last_input_tokens: i64,
     /// Local creation timestamp formatted as yyyy-MM-dd HH:mm:ss.
     pub created_at: String,
     /// Local update timestamp formatted as yyyy-MM-dd HH:mm:ss.
@@ -122,6 +124,19 @@ pub struct NewSessionMessage {
     pub created_at: String,
 }
 
+/// Per-session context compression state persisted locally.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionContextStateRecord {
+    /// Parent session identifier.
+    pub session_id: SessionId,
+    /// Compressed summary text covering the compacted history.
+    pub summary: String,
+    /// Highest turn sequence already folded into the summary.
+    pub compacted_through_turn: i64,
+    /// Local update timestamp formatted as yyyy-MM-dd HH:mm:ss.
+    pub updated_at: String,
+}
+
 /// Audit log entry for model, tool, file, and shell actions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuditLogRecord {
@@ -160,6 +175,19 @@ pub struct ModelCallLogRecord {
     pub success: bool,
     /// Local call start timestamp formatted as yyyy-MM-dd HH:mm:ss.
     pub called_at: String,
+}
+
+/// Aggregated model call telemetry for one session.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SessionModelCallStats {
+    /// Total number of model calls recorded for the session.
+    pub call_count: i64,
+    /// Sum of prompt/input tokens across all calls.
+    pub input_tokens: i64,
+    /// Sum of completion/output tokens across all calls.
+    pub output_tokens: i64,
+    /// Sum of provider cache-hit tokens across all calls.
+    pub cache_hit_tokens: i64,
 }
 
 /// New model provider call telemetry row.

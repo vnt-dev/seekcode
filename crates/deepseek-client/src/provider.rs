@@ -20,6 +20,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     /// Whether provider reasoning output should be requested.
     pub thinking: bool,
+    /// Optional provider-specific reasoning intensity.
+    pub reasoning_effort: Option<String>,
     /// Whether strict JSON schema validation is requested for tools.
     pub strict_tools: bool,
 }
@@ -34,8 +36,6 @@ pub enum ChatChunk {
     Content(String),
     /// Assistant reasoning delta.
     Reasoning(String),
-    /// Tool call delta or completed call.
-    ToolCall(ToolCall),
     /// Final usage summary.
     Usage(TokenUsage),
     /// Provider-specific completion marker.

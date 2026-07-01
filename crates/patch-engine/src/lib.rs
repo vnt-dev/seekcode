@@ -1,7 +1,6 @@
 //! Diff generation, patch application, rollback, and conflict boundaries.
 
 use seekcode_common::{SeekCodeResult, TaskId};
-use seekcode_workspace::WorkspaceRoot;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -61,25 +60,4 @@ pub struct RollbackPlan {
 /// Creates a unified diff between two text buffers.
 pub fn create_diff(_before: &str, _after: &str) -> SeekCodeResult<String> {
     todo!("create unified diff from text buffers")
-}
-
-/// Applies a patch to a workspace.
-pub async fn apply_patch(
-    _workspace: &WorkspaceRoot,
-    _patch: Patch,
-) -> SeekCodeResult<PatchApplyResult> {
-    todo!("apply patch to workspace files")
-}
-
-/// Rolls back a previous patch application.
-pub async fn rollback(_workspace: &WorkspaceRoot, _plan: RollbackPlan) -> SeekCodeResult<()> {
-    todo!("rollback patch application")
-}
-
-/// Checks for conflicts before applying a patch.
-pub async fn check_conflicts(
-    _workspace: &WorkspaceRoot,
-    _patch: &Patch,
-) -> SeekCodeResult<Vec<String>> {
-    todo!("check patch conflicts")
 }

@@ -3,11 +3,11 @@
 use crate::config::{self, provider_connection, AppSettings, ModelSetting};
 use crate::state::AppState;
 use seekcode_agent_core::{AgentEvent, AgentTask, StartTaskRequest};
-use seekcode_app_kernel::{CreateSessionRequest, OpenWorkspaceRequest, WorkspaceWithSessions};
+use seekcode_app_kernel::{
+    CreateSessionRequest, OpenWorkspaceRequest, WorkspaceWithSessions, DEFAULT_CONTEXT_WINDOW,
+};
 use seekcode_common::{SessionId, TaskId, WorkspaceId};
-use seekcode_storage::{SessionMessageRecord, SessionRecord};
-use seekcode_workspace::{FileEntry, FileSnapshot, ListOptions, WorkspaceRoot};
-use std::path::PathBuf;
+use seekcode_storage::{SessionMessageRecord, SessionModelCallStats, SessionRecord};
 use tauri::{AppHandle, Emitter, State};
 
 /// Starts an agent task.
@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, State};
 pub async fn start_agent_task(
     app: AppHandle,
     state: State<'_, AppState>,
-    request: StartTaskRequest,
+    mut request: StartTaskRequest,
 ) -> Result<AgentTask, String> {
     let session_id = request.session_id;
     let prompt = request.prompt.clone();
@@ -23,15 +23,42 @@ pub async fn start_agent_task(
         .kernel
         .get_sessions()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| {
+            tracing::warn!(
+                target: "seekcode_tauri::commands",
+                %session_id,
+                %error,
+                "failed to load sessions before starting agent task"
+            );
+            error.to_string()
+        })?
         .into_iter()
         .find(|session| session.id == session_id)
-        .ok_or_else(|| format!("session {session_id} not found"))?;
-    let settings = config::load_app_settings()
-        .await
-        .map_err(|error| error.to_string())?;
+        .ok_or_else(|| {
+            tracing::warn!(
+                target: "seekcode_tauri::commands",
+                %session_id,
+                "session was not found before starting agent task"
+            );
+            format!("session {session_id} not found")
+        })?;
+    let settings = config::load_app_settings().await.map_err(|error| {
+        tracing::warn!(
+            target: "seekcode_tauri::commands",
+            %session_id,
+            %error,
+            "failed to load app settings before starting agent task"
+        );
+        error.to_string()
+    })?;
     let (base_url, api_key) =
         provider_connection(&settings, &session.model_provider).ok_or_else(|| {
+            tracing::warn!(
+                target: "seekcode_tauri::commands",
+                %session_id,
+                model_provider = %session.model_provider,
+                "model provider is not configured before starting agent task"
+            );
             format!(
                 "model provider {} is not configured",
                 session.model_provider
@@ -44,12 +71,32 @@ pub async fn start_agent_task(
         .kernel
         .update_deepseek_config(deepseek)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            tracing::warn!(
+                target: "seekcode_tauri::commands",
+                %session_id,
+                model_provider = %session.model_provider,
+                %error,
+                "failed to update model provider config before starting agent task"
+            );
+            error.to_string()
+        })?;
+    request.thinking = Some(session.thinking_enabled);
+    request.reasoning_effort = normalize_reasoning_effort(session.reasoning_effort.clone());
     let started = state
         .kernel
         .start_agent_task(request)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            tracing::error!(
+                target: "seekcode_tauri::commands",
+                %session_id,
+                model_provider = %session.model_provider,
+                %error,
+                "failed to start agent task"
+            );
+            error.to_string()
+        })?;
     let task = started.task;
     let mut events = started.events;
     let task_id = task.id;
@@ -67,20 +114,43 @@ pub async fn start_agent_task(
                         && agent_event_session_id(&event) == Some(session_id) =>
                 {
                     let terminal = is_terminal_agent_event(&event);
-                    let _ = agent_app.emit("agent:event", event);
+                    if let Err(error) = agent_app.emit("agent:event", event) {
+                        tracing::warn!(
+                            target: "seekcode_tauri::commands",
+                            %session_id,
+                            %task_id,
+                            %error,
+                            "failed to emit agent event to frontend"
+                        );
+                    }
                     if terminal {
                         break;
                     }
                 }
                 Some(_) => {}
-                None => break,
+                None => {
+                    tracing::warn!(
+                        target: "seekcode_tauri::commands",
+                        %session_id,
+                        %task_id,
+                        "agent event stream closed before a terminal event was emitted"
+                    );
+                    break;
+                }
             }
         }
     });
 
     tauri::async_runtime::spawn(async move {
         while let Some(event) = title_events.recv().await {
-            let _ = app.emit("session:title_changed", event);
+            if let Err(error) = app.emit("session:title_changed", event) {
+                tracing::warn!(
+                    target: "seekcode_tauri::commands",
+                    %session_id,
+                    %error,
+                    "failed to emit session title change to frontend"
+                );
+            }
         }
     });
 
@@ -93,34 +163,6 @@ pub async fn cancel_agent_task(state: State<'_, AppState>, task_id: TaskId) -> R
     state
         .kernel
         .cancel_agent_task(task_id)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-/// Lists workspace files.
-#[tauri::command]
-pub async fn list_workspace(
-    state: State<'_, AppState>,
-    root: WorkspaceRoot,
-    options: Option<ListOptions>,
-) -> Result<Vec<FileEntry>, String> {
-    state
-        .kernel
-        .list_files(root, options.unwrap_or_default())
-        .await
-        .map_err(|error| error.to_string())
-}
-
-/// Reads a workspace file.
-#[tauri::command]
-pub async fn read_file(
-    state: State<'_, AppState>,
-    root: WorkspaceRoot,
-    path: String,
-) -> Result<FileSnapshot, String> {
-    state
-        .kernel
-        .read_file(root, PathBuf::from(path))
         .await
         .map_err(|error| error.to_string())
 }
@@ -206,10 +248,18 @@ pub async fn update_session_model(
     session_id: SessionId,
     model_provider: String,
     model: String,
+    thinking_enabled: bool,
+    reasoning_effort: Option<String>,
 ) -> Result<SessionRecord, String> {
     state
         .kernel
-        .update_session_model(session_id, model_provider, model)
+        .update_session_model(
+            session_id,
+            model_provider,
+            model,
+            thinking_enabled,
+            reasoning_effort,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -232,10 +282,38 @@ pub async fn delete_workspace_sessions(
 pub async fn list_session_messages(
     state: State<'_, AppState>,
     session_id: SessionId,
+    before_turn_sequence: Option<i64>,
+    turn_limit: Option<i64>,
 ) -> Result<Vec<SessionMessageRecord>, String> {
     state
         .kernel
-        .list_session_messages(session_id)
+        .list_session_messages(session_id, before_turn_sequence, turn_limit)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Returns the most recent input token count recorded for one session.
+#[tauri::command]
+pub async fn session_context_usage(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+) -> Result<i64, String> {
+    state
+        .kernel
+        .session_context_usage(session_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Returns aggregated model call telemetry for one session.
+#[tauri::command]
+pub async fn session_model_call_stats(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+) -> Result<SessionModelCallStats, String> {
+    state
+        .kernel
+        .session_model_call_stats(session_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -259,6 +337,8 @@ pub async fn save_app_settings(
         .map_err(|error| error.to_string())?;
 
     let mut kernel_config = state.kernel.config();
+    kernel_config.deepseek.context_window =
+        config::parse_context_window(&settings.context_window).unwrap_or(DEFAULT_CONTEXT_WINDOW);
     kernel_config.deepseek.base_url = settings.base_url.clone();
     kernel_config.deepseek.api_key =
         (!settings.api_key.is_empty()).then_some(settings.api_key.clone());
@@ -355,7 +435,10 @@ fn agent_event_task_id(event: &AgentEvent) -> Option<TaskId> {
         | AgentEvent::ModelRoundFinished { task_id, .. }
         | AgentEvent::Finished { task_id, .. }
         | AgentEvent::Failed { task_id, .. }
-        | AgentEvent::Canceled { task_id, .. } => Some(*task_id),
+        | AgentEvent::Canceled { task_id, .. }
+        | AgentEvent::ContextCompactionStarted { task_id, .. }
+        | AgentEvent::ContextCompactionCanceled { task_id, .. }
+        | AgentEvent::ContextCompactionFinished { task_id, .. } => Some(*task_id),
     }
 }
 
@@ -372,7 +455,10 @@ fn agent_event_session_id(event: &AgentEvent) -> Option<SessionId> {
         | AgentEvent::ModelRoundFinished { session_id, .. }
         | AgentEvent::Finished { session_id, .. }
         | AgentEvent::Failed { session_id, .. }
-        | AgentEvent::Canceled { session_id, .. } => Some(*session_id),
+        | AgentEvent::Canceled { session_id, .. }
+        | AgentEvent::ContextCompactionStarted { session_id, .. }
+        | AgentEvent::ContextCompactionCanceled { session_id, .. }
+        | AgentEvent::ContextCompactionFinished { session_id, .. } => Some(*session_id),
     }
 }
 
@@ -381,4 +467,9 @@ fn is_terminal_agent_event(event: &AgentEvent) -> bool {
         event,
         AgentEvent::Finished { .. } | AgentEvent::Failed { .. } | AgentEvent::Canceled { .. }
     )
+}
+
+fn normalize_reasoning_effort(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_lowercase();
+    matches!(value.as_str(), "high" | "max").then_some(value)
 }

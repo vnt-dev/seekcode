@@ -39,6 +39,7 @@ impl MigrationRunner {
                 model TEXT NOT NULL,
                 thinking_enabled INTEGER NOT NULL DEFAULT 0 CHECK (thinking_enabled IN (0, 1)),
                 reasoning_effort TEXT,
+                last_input_tokens INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
@@ -90,6 +91,22 @@ impl MigrationRunner {
         .map_err(storage_error)?;
 
         sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS session_context_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                compacted_through_turn INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .map_err(storage_error)?;
+
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id ON sessions(workspace_id)",
         )
         .execute(pool)
@@ -104,7 +121,21 @@ impl MigrationRunner {
         .map_err(storage_error)?;
 
         sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_session_messages_session_id_turn_order ON session_messages(session_id, turn_sequence, created_at, id)",
+        )
+        .execute(pool)
+        .await
+        .map_err(storage_error)?;
+
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_model_call_logs_session_called_at ON model_call_logs(session_id, called_at)",
+        )
+        .execute(pool)
+        .await
+        .map_err(storage_error)?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_session_context_state_session_id_id ON session_context_state(session_id, id DESC)",
         )
         .execute(pool)
         .await

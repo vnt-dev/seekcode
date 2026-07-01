@@ -1,7 +1,7 @@
 use crate::time::{local_now_text, LOCAL_TIME_FORMAT};
 use crate::{
-    MigrationRunner, ModelCallLogStore, NewSession, NewSessionMessage, NewWorkspace, SessionStore,
-    SqliteStorage, WorkspaceStore,
+    MigrationRunner, ModelCallLogStore, NewSession, NewSessionMessage, NewWorkspace,
+    SessionContextStore, SessionStore, SqliteStorage, WorkspaceStore,
 };
 use chrono::NaiveDateTime;
 use seekcode_common::{ChatMessage, ChatRole, MessageId, ModelCallLogId, SessionId, WorkspaceId};
@@ -85,11 +85,15 @@ async fn stores_workspace_session_and_messages_with_local_time_text() {
             session_id,
             "deepseek".to_string(),
             "deepseek-v4-flash".to_string(),
+            false,
+            Some("max".to_string()),
         )
         .await
         .expect("update session model");
     assert_eq!(updated_model.model_provider, "deepseek");
     assert_eq!(updated_model.model, "deepseek-v4-flash");
+    assert!(!updated_model.thinking_enabled);
+    assert_eq!(updated_model.reasoning_effort.as_deref(), Some("max"));
 
     storage
         .append_session_message(NewSessionMessage {
@@ -164,6 +168,245 @@ async fn stores_workspace_session_and_messages_with_local_time_text() {
             .await
             .expect("model call count");
     assert_eq!(model_call_count, 1);
+}
+
+#[tokio::test]
+async fn lists_session_messages_by_recent_turn_pages() {
+    let storage = test_storage().await;
+    let workspace_id = WorkspaceId::new();
+    let session_id = SessionId::new();
+    storage
+        .create_workspace(NewWorkspace {
+            id: workspace_id,
+            name: "SeekCode".to_string(),
+            absolute_path: "D:\\rust\\tmp\\seekcode".to_string(),
+            is_visible: true,
+        })
+        .await
+        .expect("create workspace");
+    storage
+        .create_session(NewSession {
+            id: session_id,
+            workspace_id,
+            name: "Paged chat".to_string(),
+            model_provider: "deepseek".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            thinking_enabled: true,
+            reasoning_effort: None,
+        })
+        .await
+        .expect("create session");
+
+    for turn_sequence in 1..=25 {
+        storage
+            .append_session_message(NewSessionMessage {
+                id: MessageId::new(),
+                session_id,
+                turn_sequence,
+                role: ChatRole::User,
+                content: format!("Question {turn_sequence}"),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                created_at: local_now_text(),
+            })
+            .await
+            .expect("append message");
+    }
+    storage
+        .append_session_message(NewSessionMessage {
+            id: MessageId::new(),
+            session_id,
+            turn_sequence: 25,
+            role: ChatRole::Assistant,
+            content: "Answer 25".to_string(),
+            reasoning_content: Some("Reasoning 25".to_string()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            created_at: local_now_text(),
+        })
+        .await
+        .expect("append second record in latest turn");
+
+    let latest = storage
+        .list_session_messages_page(session_id, None, 20)
+        .await
+        .expect("latest page");
+    assert_eq!(latest.first().map(|message| message.turn_sequence), Some(6));
+    assert_eq!(latest.last().map(|message| message.turn_sequence), Some(25));
+    assert_eq!(latest.len(), 21);
+    assert_eq!(
+        latest
+            .iter()
+            .map(|message| message.turn_sequence)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        20
+    );
+
+    let older = storage
+        .list_session_messages_page(session_id, Some(6), 20)
+        .await
+        .expect("older page");
+    assert_eq!(older.len(), 5);
+    assert_eq!(older.first().map(|message| message.turn_sequence), Some(1));
+    assert_eq!(older.last().map(|message| message.turn_sequence), Some(5));
+
+    let range = storage
+        .list_session_messages_in_turn_range(session_id, 10, Some(15))
+        .await
+        .expect("turn range");
+    assert_eq!(range.len(), 4);
+    assert_eq!(range.first().map(|message| message.turn_sequence), Some(11));
+    assert_eq!(range.last().map(|message| message.turn_sequence), Some(14));
+}
+
+#[tokio::test]
+async fn session_context_state_appends_and_session_stores_token_watermark() {
+    let storage = test_storage().await;
+    let workspace_id = WorkspaceId::new();
+    let session_id = SessionId::new();
+    storage
+        .create_workspace(NewWorkspace {
+            id: workspace_id,
+            name: "SeekCode".to_string(),
+            absolute_path: "D:\\rust\\tmp\\seekcode".to_string(),
+            is_visible: true,
+        })
+        .await
+        .expect("create workspace");
+    storage
+        .create_session(NewSession {
+            id: session_id,
+            workspace_id,
+            name: "Chat".to_string(),
+            model_provider: "deepseek".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            thinking_enabled: true,
+            reasoning_effort: None,
+        })
+        .await
+        .expect("create session");
+
+    assert!(storage
+        .get_session_context_state(session_id)
+        .await
+        .expect("get missing state")
+        .is_none());
+
+    storage
+        .update_session_last_input_tokens(session_id, 4_096)
+        .await
+        .expect("update tokens");
+    let session = storage.get_session(session_id).await.expect("get session");
+    assert_eq!(session.last_input_tokens, 4_096);
+    assert!(storage
+        .get_session_context_state(session_id)
+        .await
+        .expect("get missing state after token update")
+        .is_none());
+
+    storage
+        .save_session_compaction(session_id, "summary text".to_string(), 5)
+        .await
+        .expect("save compaction");
+    let state = storage
+        .get_session_context_state(session_id)
+        .await
+        .expect("get state")
+        .expect("state exists");
+    assert_eq!(state.summary, "summary text");
+    assert_eq!(state.compacted_through_turn, 5);
+
+    storage
+        .save_session_compaction(session_id, "newer summary".to_string(), 8)
+        .await
+        .expect("save second compaction");
+    let state = storage
+        .get_session_context_state(session_id)
+        .await
+        .expect("get latest state")
+        .expect("state exists");
+    assert_eq!(state.summary, "newer summary");
+    assert_eq!(state.compacted_through_turn, 8);
+    assert_local_time_text(&state.updated_at);
+
+    let row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM session_context_state WHERE session_id = ?1")
+            .bind(session_id.to_string())
+            .fetch_one(storage.pool())
+            .await
+            .expect("context state count");
+    assert_eq!(row_count, 2);
+
+    storage
+        .update_session_last_input_tokens(session_id, 9_000)
+        .await
+        .expect("update tokens again");
+    let session = storage.get_session(session_id).await.expect("get session");
+    assert_eq!(session.last_input_tokens, 9_000);
+}
+
+#[tokio::test]
+async fn session_model_call_stats_aggregates_rows() {
+    let storage = test_storage().await;
+    let workspace_id = WorkspaceId::new();
+    let session_id = SessionId::new();
+    storage
+        .create_workspace(NewWorkspace {
+            id: workspace_id,
+            name: "SeekCode".to_string(),
+            absolute_path: "D:\\rust\\tmp\\seekcode".to_string(),
+            is_visible: true,
+        })
+        .await
+        .expect("create workspace");
+    storage
+        .create_session(NewSession {
+            id: session_id,
+            workspace_id,
+            name: "Chat".to_string(),
+            model_provider: "deepseek".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            thinking_enabled: true,
+            reasoning_effort: None,
+        })
+        .await
+        .expect("create session");
+
+    let empty = storage
+        .session_model_call_stats(session_id)
+        .await
+        .expect("empty stats");
+    assert_eq!(empty.call_count, 0);
+    assert_eq!(empty.input_tokens, 0);
+
+    for (input, output, cache) in [(100, 40, 30), (200, 60, 50)] {
+        storage
+            .append_model_call_log(crate::NewModelCallLog {
+                id: ModelCallLogId::new(),
+                model_provider: "deepseek".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                session_id,
+                input_tokens: input,
+                output_tokens: output,
+                cache_hit_tokens: cache,
+                elapsed_ms: 10,
+                success: true,
+                called_at: local_now_text(),
+            })
+            .await
+            .expect("append model call log");
+    }
+
+    let stats = storage
+        .session_model_call_stats(session_id)
+        .await
+        .expect("aggregated stats");
+    assert_eq!(stats.call_count, 2);
+    assert_eq!(stats.input_tokens, 300);
+    assert_eq!(stats.output_tokens, 100);
+    assert_eq!(stats.cache_hit_tokens, 80);
 }
 
 fn assert_local_time_text(value: &str) {

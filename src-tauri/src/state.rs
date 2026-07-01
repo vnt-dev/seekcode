@@ -1,7 +1,7 @@
 //! Tauri application state wrapper.
 
-use crate::config::{database_path, load_app_settings_sync};
-use seekcode_app_kernel::{AppKernel, AppKernelConfig};
+use crate::config::{database_path, load_app_settings_sync, parse_context_window};
+use seekcode_app_kernel::{AppKernel, AppKernelConfig, DEFAULT_CONTEXT_WINDOW};
 use seekcode_storage::SqliteStorage;
 use std::sync::Arc;
 
@@ -16,6 +16,8 @@ impl AppState {
     pub fn new() -> anyhow::Result<Self> {
         let settings = load_app_settings_sync()?;
         let mut config = AppKernelConfig::default();
+        config.deepseek.context_window =
+            parse_context_window(&settings.context_window).unwrap_or(DEFAULT_CONTEXT_WINDOW);
         config.deepseek.base_url = settings.base_url;
         config.deepseek.api_key = (!settings.api_key.is_empty()).then_some(settings.api_key);
         config.title_model = settings.title_model;

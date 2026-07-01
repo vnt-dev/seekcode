@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::fmt::{self, Debug, Display};
 use std::path::Path;
 use thiserror::Error;
+use tracing_subscriber::{fmt as tracing_fmt, EnvFilter};
 use ulid::Ulid;
 
 /// Result type used across SeekCode backend crates.
@@ -13,6 +14,36 @@ pub type SeekCodeResult<T> = Result<T, SeekCodeError>;
 
 /// UTC timestamp type used in persisted and streamed DTOs.
 pub type UtcDateTime = DateTime<Utc>;
+
+/// Telemetry configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Env-filter compatible tracing directive.
+    pub filter: String,
+    /// Whether ANSI colors should be emitted.
+    pub ansi: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            filter: "info,seekcode=debug".to_string(),
+            ansi: true,
+        }
+    }
+}
+
+/// Initializes tracing for the desktop application.
+pub fn init_tracing(config: &TelemetryConfig) -> SeekCodeResult<()> {
+    let filter = EnvFilter::try_new(&config.filter).unwrap_or_else(|_| EnvFilter::new("info"));
+    let subscriber = tracing_fmt()
+        .with_env_filter(filter)
+        .with_ansi(config.ansi)
+        .finish();
+
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    Ok(())
+}
 
 macro_rules! id_type {
     ($name:ident) => {

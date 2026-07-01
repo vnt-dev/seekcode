@@ -3,15 +3,15 @@
 use async_trait::async_trait;
 use schemars::schema::RootSchema;
 use seekcode_common::{SeekCodeError, SeekCodeResult, TaskId, ToolCallId, WorkspaceId};
-use seekcode_model_provider::ToolSpec;
+use seekcode_deepseek_client::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use walkdir::WalkDir;
 
@@ -19,18 +19,14 @@ use walkdir::WalkDir;
 pub const READ_FILE_TOOL: &str = "read_file";
 /// Name for the write file tool.
 pub const WRITE_FILE_TOOL: &str = "write_file";
-/// Name for the list files tool.
-pub const LIST_FILES_TOOL: &str = "list_files";
+/// Name for the insert lines tool.
+pub const INSERT_LINES_TOOL: &str = "insert_lines";
 /// Name for the text search tool.
 pub const SEARCH_TEXT_TOOL: &str = "search_text";
-/// Name for the apply patch tool.
-pub const APPLY_PATCH_TOOL: &str = "apply_patch";
 /// Name for the run command tool.
 pub const RUN_COMMAND_TOOL: &str = "run_command";
-/// Name for the git status tool.
-pub const GIT_STATUS_TOOL: &str = "git_status";
-/// Name for the git diff tool.
-pub const GIT_DIFF_TOOL: &str = "git_diff";
+
+const MAX_READ_FILE_LINES: usize = 5_000;
 
 /// Raw JSON input passed to a tool.
 pub type ToolInput = Value;
@@ -73,8 +69,6 @@ pub struct ToolExecution {
 /// Runtime configuration for workspace-scoped system tools.
 #[derive(Clone, Debug)]
 pub struct SystemToolConfig {
-    /// Canonical absolute workspace root.
-    pub workspace_root: PathBuf,
     /// Maximum file size read by text tools.
     pub max_file_bytes: u64,
     /// Maximum command output retained per stream.
@@ -86,26 +80,20 @@ pub struct SystemToolConfig {
 }
 
 impl SystemToolConfig {
-    /// Creates a system tool config for an existing workspace root.
-    pub fn new(workspace_root: impl Into<PathBuf>) -> SeekCodeResult<Self> {
-        let workspace_root = workspace_root.into();
-        let workspace_root = workspace_root
-            .canonicalize()
-            .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
-        if !workspace_root.is_dir() {
-            return Err(SeekCodeError::Workspace(format!(
-                "workspace root is not a directory: {}",
-                workspace_root.display()
-            )));
-        }
-
-        Ok(Self {
-            workspace_root,
-            max_file_bytes: 2 * 1024 * 1024,
+    /// Creates a system tool config with default limits.
+    pub fn new() -> Self {
+        Self {
+            max_file_bytes: 10 * 1024 * 1024,
             max_command_output_bytes: 512 * 1024,
             command_timeout: Duration::from_secs(120),
             max_search_results: 200,
-        })
+        }
+    }
+}
+
+impl Default for SystemToolConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -116,12 +104,9 @@ pub fn register_system_tools(
 ) -> SeekCodeResult<()> {
     registry.register(ReadFileTool::new(config.clone()))?;
     registry.register(WriteFileTool::new(config.clone()))?;
-    registry.register(ListFilesTool::new(config.clone()))?;
+    registry.register(InsertLinesTool::new(config.clone()))?;
     registry.register(SearchTextTool::new(config.clone()))?;
-    registry.register(ApplyPatchTool::new(config.clone()))?;
-    registry.register(RunCommandTool::new(config.clone()))?;
-    registry.register(GitStatusTool::new(config.clone()))?;
-    registry.register(GitDiffTool::new(config))?;
+    registry.register(RunCommandTool::new(config))?;
     Ok(())
 }
 
@@ -145,24 +130,22 @@ impl ReadFileTool {
 }
 
 /// Tool that writes UTF-8 content to a workspace file.
-pub struct WriteFileTool {
-    config: SystemToolConfig,
-}
+pub struct WriteFileTool;
 
 impl WriteFileTool {
     /// Creates a write file tool.
-    pub fn new(config: SystemToolConfig) -> Self {
-        Self { config }
+    pub fn new(_config: SystemToolConfig) -> Self {
+        Self
     }
 }
 
-/// Tool that lists workspace files.
-pub struct ListFilesTool {
+/// Tool that inserts UTF-8 content after a line in a workspace file.
+pub struct InsertLinesTool {
     config: SystemToolConfig,
 }
 
-impl ListFilesTool {
-    /// Creates a list files tool.
+impl InsertLinesTool {
+    /// Creates an insert lines tool.
     pub fn new(config: SystemToolConfig) -> Self {
         Self { config }
     }
@@ -180,18 +163,6 @@ impl SearchTextTool {
     }
 }
 
-/// Tool that applies a unified diff with git apply.
-pub struct ApplyPatchTool {
-    config: SystemToolConfig,
-}
-
-impl ApplyPatchTool {
-    /// Creates an apply patch tool.
-    pub fn new(config: SystemToolConfig) -> Self {
-        Self { config }
-    }
-}
-
 /// Tool that runs a non-interactive command in the workspace.
 pub struct RunCommandTool {
     config: SystemToolConfig,
@@ -204,39 +175,18 @@ impl RunCommandTool {
     }
 }
 
-/// Tool that runs git status.
-pub struct GitStatusTool {
-    config: SystemToolConfig,
-}
-
-impl GitStatusTool {
-    /// Creates a git status tool.
-    pub fn new(config: SystemToolConfig) -> Self {
-        Self { config }
-    }
-}
-
-/// Tool that runs git diff.
-pub struct GitDiffTool {
-    config: SystemToolConfig,
-}
-
-impl GitDiffTool {
-    /// Creates a git diff tool.
-    pub fn new(config: SystemToolConfig) -> Self {
-        Self { config }
-    }
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ReadFileInput {
-    /// Workspace-relative file path.
+    /// Absolute path, or a path relative to the workspace root.
     path: PathBuf,
+    /// 1-based line number to start reading from.
+    #[serde(default = "default_start_line")]
+    start_line: usize,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WriteFileInput {
-    /// Workspace-relative file path.
+    /// Absolute path, or a path relative to the workspace root.
     path: PathBuf,
     /// UTF-8 content to write.
     content: String,
@@ -246,23 +196,20 @@ struct WriteFileInput {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ListFilesInput {
-    /// Workspace-relative directory path.
-    #[serde(default)]
-    path: Option<PathBuf>,
-    /// Maximum traversal depth.
-    #[serde(default)]
-    max_depth: Option<usize>,
-    /// Maximum entries returned.
-    #[serde(default)]
-    limit: Option<usize>,
+struct InsertLinesInput {
+    /// Absolute path, or a path relative to the workspace root.
+    path: PathBuf,
+    /// 1-based line number after which content is inserted. Use 0 to insert at the beginning.
+    line: usize,
+    /// UTF-8 content to insert.
+    content: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchTextInput {
     /// Substring pattern to search for.
     pattern: String,
-    /// Workspace-relative directory or file path to search.
+    /// Absolute directory or file path, or a path relative to the workspace root.
     #[serde(default)]
     path: Option<PathBuf>,
     /// Maximum matches returned.
@@ -271,40 +218,15 @@ struct SearchTextInput {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ApplyPatchInput {
-    /// Unified diff accepted by git apply.
-    patch: String,
-    /// Whether to run git apply --check before applying.
-    #[serde(default = "default_true")]
-    check: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RunCommandInput {
-    /// Program to execute without a shell.
-    program: String,
-    /// Program arguments.
-    #[serde(default)]
-    args: Vec<String>,
-    /// Workspace-relative working directory.
+    /// Command line to execute.
+    command: String,
+    /// Absolute working directory, or a path relative to the workspace root.
     #[serde(default)]
     cwd: Option<PathBuf>,
-    /// Extra environment variables.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
     /// Timeout in milliseconds.
     #[serde(default)]
     timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct GitDiffInput {
-    /// Show staged changes instead of unstaged changes.
-    #[serde(default)]
-    staged: bool,
-    /// Optional workspace-relative path filter.
-    #[serde(default)]
-    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -407,16 +329,23 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 text file from the current workspace."
+        "Read up to 5000 lines from a UTF-8 text file by absolute path or a path relative to the workspace root. Reading starts at start_line, defaulting to 1."
     }
 
     fn input_schema(&self) -> RootSchema {
         schemars::schema_for!(ReadFileInput)
     }
 
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+    async fn execute(&self, ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+        let workspace_root = workspace_root_from_context(&ctx)?;
         let input: ReadFileInput = parse_input(input)?;
-        let path = resolve_existing_workspace_path(&self.config.workspace_root, &input.path)?;
+        if input.start_line == 0 {
+            return Err(SeekCodeError::Validation(
+                "read start_line must be at least 1".to_string(),
+            ));
+        }
+
+        let path = resolve_existing_workspace_path(&workspace_root, &input.path)?;
         let metadata = tokio::fs::metadata(&path)
             .await
             .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
@@ -430,15 +359,27 @@ impl Tool for ReadFileTool {
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
+        let (content, line_count, total_lines) =
+            read_line_window(&content, input.start_line, MAX_READ_FILE_LINES);
+        let end_line = (line_count > 0).then_some(input.start_line + line_count - 1);
+        let truncated = end_line
+            .map(|end_line| end_line < total_lines)
+            .unwrap_or(false);
         Ok(ToolOutput {
             content: json!({
-                "path": relative_display(&self.config.workspace_root, &path),
+                "path": relative_display(&workspace_root, &path),
                 "content": content,
                 "bytes": metadata.len(),
+                "start_line": input.start_line,
+                "end_line": end_line,
+                "line_count": line_count,
+                "total_lines": total_lines,
+                "truncated": truncated,
             }),
             summary: format!(
-                "Read {}",
-                relative_display(&self.config.workspace_root, &path)
+                "Read {} lines from {}",
+                line_count,
+                relative_display(&workspace_root, &path)
             ),
         })
     }
@@ -451,16 +392,17 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write UTF-8 content to a file inside the current workspace."
+        "Write UTF-8 content to a file by absolute path or a path relative to the workspace root."
     }
 
     fn input_schema(&self) -> RootSchema {
         schemars::schema_for!(WriteFileInput)
     }
 
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+    async fn execute(&self, ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+        let workspace_root = workspace_root_from_context(&ctx)?;
         let input: WriteFileInput = parse_input(input)?;
-        let path = resolve_new_workspace_path(&self.config.workspace_root, &input.path)?;
+        let path = resolve_new_workspace_path(&workspace_root, &input.path)?;
         if let Some(parent) = path.parent() {
             if input.create_dirs {
                 tokio::fs::create_dir_all(parent)
@@ -469,7 +411,7 @@ impl Tool for WriteFileTool {
             } else if !parent.exists() {
                 return Err(SeekCodeError::Workspace(format!(
                     "parent directory does not exist: {}",
-                    relative_display(&self.config.workspace_root, parent)
+                    relative_display(&workspace_root, parent)
                 )));
             }
         }
@@ -479,97 +421,77 @@ impl Tool for WriteFileTool {
             .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
         Ok(ToolOutput {
             content: json!({
-                "path": relative_display(&self.config.workspace_root, &path),
+                "path": relative_display(&workspace_root, &path),
                 "bytes": input.content.len(),
             }),
             summary: format!(
                 "Wrote {} bytes to {}",
                 input.content.len(),
-                relative_display(&self.config.workspace_root, &path)
+                relative_display(&workspace_root, &path)
             ),
         })
     }
 }
 
 #[async_trait]
-impl Tool for ListFilesTool {
+impl Tool for InsertLinesTool {
     fn name(&self) -> &'static str {
-        LIST_FILES_TOOL
+        INSERT_LINES_TOOL
     }
 
     fn description(&self) -> &'static str {
-        "List files and directories inside the current workspace."
+        "Insert UTF-8 content into a file after a 1-based line number. Use line 0 to insert at the beginning."
     }
 
     fn input_schema(&self) -> RootSchema {
-        schemars::schema_for!(ListFilesInput)
+        schemars::schema_for!(InsertLinesInput)
     }
 
     async fn execute(&self, ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
-        let started_at = Instant::now();
-        tracing::debug!(
-            target: "seekcode_tool_system::list_files",
-            task_id = %ctx.task_id,
-            workspace_id = ?ctx.workspace_id,
-            workspace_root = %self.config.workspace_root.display(),
-            raw_input = %input,
-            "list_files tool started"
-        );
-        let input: ListFilesInput = parse_input(input)?;
-        let base = input.path.unwrap_or_else(|| PathBuf::from("."));
-        let base = resolve_existing_workspace_path(&self.config.workspace_root, &base)?;
-        let max_depth = input.max_depth.unwrap_or(4);
-        let limit = input.limit.unwrap_or(500);
-        let mut entries = Vec::new();
-        tracing::debug!(
-            target: "seekcode_tool_system::list_files",
-            task_id = %ctx.task_id,
-            base = %base.display(),
-            max_depth,
-            limit,
-            "list_files resolved input"
-        );
-
-        for entry in WalkDir::new(&base)
-            .max_depth(max_depth)
-            .into_iter()
-            .filter_entry(|entry| !is_ignored_name(entry.path()))
-        {
-            let entry = entry.map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
-            if entry.path() == base {
-                continue;
-            }
-            let metadata = entry
-                .metadata()
-                .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
-            entries.push(json!({
-                "path": relative_display(&self.config.workspace_root, entry.path()),
-                "is_dir": metadata.is_dir(),
-                "size": metadata.is_file().then_some(metadata.len()),
-            }));
-            if entries.len() >= limit {
-                tracing::debug!(
-                    target: "seekcode_tool_system::list_files",
-                    task_id = %ctx.task_id,
-                    entries = entries.len(),
-                    elapsed_ms = started_at.elapsed().as_millis(),
-                    "list_files reached limit"
-                );
-                break;
-            }
+        let workspace_root = workspace_root_from_context(&ctx)?;
+        let input: InsertLinesInput = parse_input(input)?;
+        let path = resolve_existing_workspace_path(&workspace_root, &input.path)?;
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
+        if metadata.len() > self.config.max_file_bytes {
+            return Err(SeekCodeError::Workspace(format!(
+                "file is too large to edit: {} bytes",
+                metadata.len()
+            )));
         }
 
-        tracing::debug!(
-            target: "seekcode_tool_system::list_files",
-            task_id = %ctx.task_id,
-            entries = entries.len(),
-            elapsed_ms = started_at.elapsed().as_millis(),
-            "list_files tool finished"
-        );
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
+        let total_lines = count_text_lines(&content);
+        let insert_at = line_end_byte_index(&content, input.line).ok_or_else(|| {
+            SeekCodeError::Validation(format!(
+                "insert line {} is outside the file line range 0..={}",
+                input.line, total_lines
+            ))
+        })?;
+        let mut updated = String::with_capacity(content.len() + input.content.len());
+        updated.push_str(&content[..insert_at]);
+        updated.push_str(&input.content);
+        updated.push_str(&content[insert_at..]);
 
+        tokio::fs::write(&path, updated.as_bytes())
+            .await
+            .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
         Ok(ToolOutput {
-            content: json!({ "entries": entries }),
-            summary: format!("Listed {} entries", entries.len()),
+            content: json!({
+                "path": relative_display(&workspace_root, &path),
+                "line": input.line,
+                "inserted_bytes": input.content.len(),
+                "bytes": updated.len(),
+            }),
+            summary: format!(
+                "Inserted {} bytes into {} after line {}",
+                input.content.len(),
+                relative_display(&workspace_root, &path),
+                input.line
+            ),
         })
     }
 }
@@ -581,14 +503,15 @@ impl Tool for SearchTextTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search UTF-8 workspace files by substring."
+        "Search UTF-8 files by substring at an absolute path or a path relative to the workspace root."
     }
 
     fn input_schema(&self) -> RootSchema {
         schemars::schema_for!(SearchTextInput)
     }
 
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+    async fn execute(&self, ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+        let workspace_root = workspace_root_from_context(&ctx)?;
         let input: SearchTextInput = parse_input(input)?;
         if input.pattern.is_empty() {
             return Err(SeekCodeError::Validation(
@@ -597,28 +520,43 @@ impl Tool for SearchTextTool {
         }
 
         let base = input.path.unwrap_or_else(|| PathBuf::from("."));
-        let base = resolve_existing_workspace_path(&self.config.workspace_root, &base)?;
+        let base = resolve_existing_workspace_path(&workspace_root, &base)?;
         let limit = input.limit.unwrap_or(self.config.max_search_results);
         let mut matches = Vec::new();
 
-        for file in collect_search_files(&self.config, &base)? {
-            let content = match tokio::fs::read_to_string(&file).await {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            for (index, line) in content.lines().enumerate() {
-                if line.contains(&input.pattern) {
-                    matches.push(json!({
-                        "path": relative_display(&self.config.workspace_root, &file),
-                        "line": index + 1,
-                        "text": line,
-                    }));
-                    if matches.len() >= limit {
-                        return Ok(ToolOutput {
-                            content: json!({ "matches": matches }),
-                            summary: format!("Found {} matches", limit),
-                        });
-                    }
+        // A single file target is searched directly; otherwise the tree is walked
+        // lazily so files are searched one at a time instead of being collected up
+        // front. Each file is streamed line by line and we stop as soon as the
+        // match limit is reached.
+        if base.is_file() {
+            search_file_lines(&base, &input.pattern, &workspace_root, limit, &mut matches).await?;
+        } else {
+            for entry in WalkDir::new(&base)
+                .into_iter()
+                .filter_entry(|entry| !is_ignored_name(entry.path()))
+            {
+                let entry = entry.map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let too_large = entry
+                    .metadata()
+                    .map(|metadata| metadata.len() > self.config.max_file_bytes)
+                    .unwrap_or(true);
+                if too_large {
+                    continue;
+                }
+
+                let limit_reached = search_file_lines(
+                    entry.path(),
+                    &input.pattern,
+                    &workspace_root,
+                    limit,
+                    &mut matches,
+                )
+                .await?;
+                if limit_reached {
+                    break;
                 }
             }
         }
@@ -631,99 +569,34 @@ impl Tool for SearchTextTool {
 }
 
 #[async_trait]
-impl Tool for ApplyPatchTool {
-    fn name(&self) -> &'static str {
-        APPLY_PATCH_TOOL
-    }
-
-    fn description(&self) -> &'static str {
-        "Apply a unified diff to the workspace using git apply."
-    }
-
-    fn input_schema(&self) -> RootSchema {
-        schemars::schema_for!(ApplyPatchInput)
-    }
-
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
-        let input: ApplyPatchInput = parse_input(input)?;
-        if input.patch.trim().is_empty() {
-            return Err(SeekCodeError::Validation(
-                "patch cannot be empty".to_string(),
-            ));
-        }
-
-        if input.check {
-            let check = run_program_with_stdin(
-                &self.config,
-                "git",
-                &["apply", "--check", "--whitespace=nowarn"],
-                &self.config.workspace_root,
-                &input.patch,
-                self.config.command_timeout,
-                BTreeMap::new(),
-            )
-            .await?;
-            if check.exit_code != Some(0) {
-                return Err(SeekCodeError::Patch(format!(
-                    "git apply --check failed: {}{}",
-                    check.stdout, check.stderr
-                )));
-            }
-        }
-
-        let result = run_program_with_stdin(
-            &self.config,
-            "git",
-            &["apply", "--whitespace=nowarn"],
-            &self.config.workspace_root,
-            &input.patch,
-            self.config.command_timeout,
-            BTreeMap::new(),
-        )
-        .await?;
-        if result.exit_code != Some(0) {
-            return Err(SeekCodeError::Patch(format!(
-                "git apply failed: {}{}",
-                result.stdout, result.stderr
-            )));
-        }
-
-        Ok(ToolOutput {
-            content: serde_json::to_value(&result)
-                .map_err(|error| SeekCodeError::Internal(error.to_string()))?,
-            summary: "Applied patch".to_string(),
-        })
-    }
-}
-
-#[async_trait]
 impl Tool for RunCommandTool {
     fn name(&self) -> &'static str {
         RUN_COMMAND_TOOL
     }
 
     fn description(&self) -> &'static str {
-        "Run a non-interactive command inside the current workspace without a shell."
+        run_command_description()
     }
 
     fn input_schema(&self) -> RootSchema {
         schemars::schema_for!(RunCommandInput)
     }
 
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+    async fn execute(&self, ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
+        let workspace_root = workspace_root_from_context(&ctx)?;
         let input: RunCommandInput = parse_input(input)?;
-        if input.program.trim().is_empty() {
+        if input.command.trim().is_empty() {
             return Err(SeekCodeError::Validation(
-                "command program cannot be empty".to_string(),
+                "command cannot be empty".to_string(),
             ));
         }
 
         let cwd = input.cwd.unwrap_or_else(|| PathBuf::from("."));
-        let cwd = resolve_existing_workspace_path(&self.config.workspace_root, &cwd)?;
+        let cwd = resolve_existing_workspace_path(&workspace_root, &cwd)?;
         if !cwd.is_dir() {
             return Err(SeekCodeError::Shell(format!(
                 "command cwd is not a directory: {}",
-                relative_display(&self.config.workspace_root, &cwd)
+                relative_display(&workspace_root, &cwd)
             )));
         }
 
@@ -731,16 +604,7 @@ impl Tool for RunCommandTool {
             .timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(self.config.command_timeout);
-        let arg_refs = input.args.iter().map(String::as_str).collect::<Vec<_>>();
-        let result = run_program(
-            &self.config,
-            &input.program,
-            &arg_refs,
-            &cwd,
-            timeout,
-            input.env,
-        )
-        .await?;
+        let result = run_command_line(&self.config, &input.command, &cwd, timeout).await?;
 
         Ok(ToolOutput {
             content: serde_json::to_value(&result)
@@ -756,100 +620,6 @@ impl Tool for RunCommandTool {
     }
 }
 
-#[async_trait]
-impl Tool for GitStatusTool {
-    fn name(&self) -> &'static str {
-        GIT_STATUS_TOOL
-    }
-
-    fn description(&self) -> &'static str {
-        "Show git status for the current workspace."
-    }
-
-    fn input_schema(&self) -> RootSchema {
-        schemars::schema_for!(AnyToolInput)
-    }
-
-    async fn execute(&self, _ctx: ToolContext, _input: ToolInput) -> SeekCodeResult<ToolOutput> {
-        let result = run_program(
-            &self.config,
-            "git",
-            &["status", "--short", "--branch"],
-            &self.config.workspace_root,
-            self.config.command_timeout,
-            BTreeMap::new(),
-        )
-        .await?;
-
-        Ok(ToolOutput {
-            summary: "Read git status".to_string(),
-            content: serde_json::to_value(&result)
-                .map_err(|error| SeekCodeError::Internal(error.to_string()))?,
-        })
-    }
-}
-
-#[async_trait]
-impl Tool for GitDiffTool {
-    fn name(&self) -> &'static str {
-        GIT_DIFF_TOOL
-    }
-
-    fn description(&self) -> &'static str {
-        "Show git diff for the current workspace."
-    }
-
-    fn input_schema(&self) -> RootSchema {
-        schemars::schema_for!(GitDiffInput)
-    }
-
-    async fn execute(&self, _ctx: ToolContext, input: ToolInput) -> SeekCodeResult<ToolOutput> {
-        let input: GitDiffInput = parse_input(input)?;
-        let mut args = vec!["diff"];
-        if input.staged {
-            args.push("--staged");
-        }
-
-        let path_filter = if let Some(path) = input.path {
-            Some(resolve_existing_workspace_path(
-                &self.config.workspace_root,
-                &path,
-            )?)
-        } else {
-            None
-        };
-        if path_filter.is_some() {
-            args.push("--");
-        }
-        let path_string = path_filter
-            .as_ref()
-            .map(|path| relative_display(&self.config.workspace_root, path));
-        if let Some(path) = path_string.as_deref() {
-            args.push(path);
-        }
-
-        let result = run_program(
-            &self.config,
-            "git",
-            &args,
-            &self.config.workspace_root,
-            self.config.command_timeout,
-            BTreeMap::new(),
-        )
-        .await?;
-
-        Ok(ToolOutput {
-            summary: "Read git diff".to_string(),
-            content: serde_json::to_value(&result)
-                .map_err(|error| SeekCodeError::Internal(error.to_string()))?,
-        })
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-
 fn parse_input<T>(input: ToolInput) -> SeekCodeResult<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -857,76 +627,92 @@ where
     serde_json::from_value(input).map_err(|error| SeekCodeError::Validation(error.to_string()))
 }
 
-fn reject_unsafe_relative_path(path: &Path) -> SeekCodeResult<()> {
-    if path.as_os_str().is_empty() {
-        return Ok(());
-    }
+fn default_start_line() -> usize {
+    1
+}
 
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(SeekCodeError::PolicyDenied(format!(
-                    "path must stay inside workspace: {}",
-                    path.display()
-                )));
-            }
+fn read_line_window(content: &str, start_line: usize, max_lines: usize) -> (String, usize, usize) {
+    let mut selected = String::new();
+    let mut selected_lines = 0usize;
+    let mut total_lines = 0usize;
+
+    for (index, line) in content.split_inclusive('\n').enumerate() {
+        total_lines += 1;
+        let line_number = index + 1;
+        if line_number >= start_line && selected_lines < max_lines {
+            selected.push_str(line);
+            selected_lines += 1;
         }
     }
 
-    Ok(())
+    (selected, selected_lines, total_lines)
 }
 
-fn resolve_existing_workspace_path(root: &Path, relative: &Path) -> SeekCodeResult<PathBuf> {
-    reject_unsafe_relative_path(relative)?;
-    let path = root.join(relative);
-    let canonical = path
+fn count_text_lines(content: &str) -> usize {
+    content.split_inclusive('\n').count()
+}
+
+fn line_end_byte_index(content: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return Some(0);
+    }
+
+    let mut end = 0usize;
+    for (index, text_line) in content.split_inclusive('\n').enumerate() {
+        end += text_line.len();
+        if index + 1 == line {
+            return Some(end);
+        }
+    }
+
+    None
+}
+
+/// Returns the canonical workspace root supplied for this tool execution.
+fn workspace_root_from_context(ctx: &ToolContext) -> SeekCodeResult<PathBuf> {
+    let root = ctx.workspace_root.as_ref().ok_or_else(|| {
+        SeekCodeError::Workspace("workspace root was not provided to the tool".to_string())
+    })?;
+    let root = root
         .canonicalize()
         .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
-    if !canonical.starts_with(root) {
-        return Err(SeekCodeError::PolicyDenied(format!(
-            "path escapes workspace: {}",
-            relative.display()
+    if !root.is_dir() {
+        return Err(SeekCodeError::Workspace(format!(
+            "workspace root is not a directory: {}",
+            root.display()
         )));
     }
 
-    Ok(canonical)
+    Ok(root)
 }
 
-fn resolve_new_workspace_path(root: &Path, relative: &Path) -> SeekCodeResult<PathBuf> {
-    reject_unsafe_relative_path(relative)?;
-    let path = root.join(relative);
+/// Joins an input path against the workspace root. Absolute paths are used
+/// as-is; relative paths are resolved against the workspace root. Tools are not
+/// restricted to the workspace root.
+fn join_workspace_path(root: &Path, input: &Path) -> PathBuf {
+    if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        root.join(input)
+    }
+}
+
+/// Resolves an existing path for reading or traversal.
+fn resolve_existing_workspace_path(root: &Path, input: &Path) -> SeekCodeResult<PathBuf> {
+    join_workspace_path(root, input)
+        .canonicalize()
+        .map_err(|error| SeekCodeError::Workspace(error.to_string()))
+}
+
+/// Resolves a target path for a new file, returning the existing path when it
+/// already exists.
+fn resolve_new_workspace_path(root: &Path, input: &Path) -> SeekCodeResult<PathBuf> {
+    let path = join_workspace_path(root, input);
     if path.exists() {
-        return resolve_existing_workspace_path(root, relative);
-    }
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| SeekCodeError::Workspace("file path has no parent".to_string()))?;
-    let parent_to_check = nearest_existing_parent(parent)?;
-    let canonical_parent = parent_to_check
-        .canonicalize()
-        .map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
-    if !canonical_parent.starts_with(root) {
-        return Err(SeekCodeError::PolicyDenied(format!(
-            "path escapes workspace: {}",
-            relative.display()
-        )));
+        return resolve_existing_workspace_path(root, input);
     }
 
     Ok(path)
-}
-
-fn nearest_existing_parent(path: &Path) -> SeekCodeResult<PathBuf> {
-    let mut current = path;
-    loop {
-        if current.exists() {
-            return Ok(current.to_path_buf());
-        }
-        current = current
-            .parent()
-            .ok_or_else(|| SeekCodeError::Workspace("no existing parent directory".to_string()))?;
-    }
 }
 
 fn relative_display(root: &Path, path: &Path) -> String {
@@ -943,90 +729,90 @@ fn is_ignored_name(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_search_files(config: &SystemToolConfig, base: &Path) -> SeekCodeResult<Vec<PathBuf>> {
-    if base.is_file() {
-        return Ok(vec![base.to_path_buf()]);
-    }
+/// Searches one file line by line, appending matches until the limit is hit.
+/// Returns `true` once the match limit has been reached. Files that cannot be
+/// opened or are not valid UTF-8 are skipped.
+async fn search_file_lines(
+    path: &Path,
+    pattern: &str,
+    workspace_root: &Path,
+    limit: usize,
+    matches: &mut Vec<Value>,
+) -> SeekCodeResult<bool> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return Ok(false),
+    };
 
-    let mut files = Vec::new();
-    for entry in WalkDir::new(base)
-        .into_iter()
-        .filter_entry(|entry| !is_ignored_name(entry.path()))
-    {
-        let entry = entry.map_err(|error| SeekCodeError::Workspace(error.to_string()))?;
-        if entry.path().is_file()
-            && entry
-                .metadata()
-                .map(|metadata| metadata.len() <= config.max_file_bytes)
-                .unwrap_or(false)
-        {
-            files.push(entry.path().to_path_buf());
+    let mut lines = BufReader::new(file).lines();
+    let mut line_number = 0usize;
+    loop {
+        // Read one line at a time so large files never load fully into memory.
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(_) => return Ok(false),
+        };
+        line_number += 1;
+
+        if line.contains(pattern) {
+            matches.push(json!({
+                "path": relative_display(workspace_root, path),
+                "line": line_number,
+                "text": line,
+            }));
+            if matches.len() >= limit {
+                return Ok(true);
+            }
         }
     }
 
-    Ok(files)
+    Ok(false)
 }
 
-async fn run_program(
-    config: &SystemToolConfig,
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    timeout: Duration,
-    env: BTreeMap<String, String>,
-) -> SeekCodeResult<CommandResult> {
-    run_program_inner(config, program, args, cwd, None, timeout, env).await
+/// Builds the base shell command for the current platform.
+fn build_command(command_line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", command_line]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.args(["-c", command_line]);
+        command
+    }
 }
 
-async fn run_program_with_stdin(
-    config: &SystemToolConfig,
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    stdin: &str,
-    timeout: Duration,
-    env: BTreeMap<String, String>,
-) -> SeekCodeResult<CommandResult> {
-    run_program_inner(config, program, args, cwd, Some(stdin), timeout, env).await
+#[cfg(windows)]
+fn run_command_description() -> &'static str {
+    "Run a non-interactive command line through PowerShell. The working directory may be absolute or relative to the workspace root."
 }
 
-async fn run_program_inner(
+#[cfg(not(windows))]
+fn run_command_description() -> &'static str {
+    "Run a non-interactive command line through sh. The working directory may be absolute or relative to the workspace root."
+}
+
+async fn run_command_line(
     config: &SystemToolConfig,
-    program: &str,
-    args: &[&str],
+    command_line: &str,
     cwd: &Path,
-    stdin: Option<&str>,
     timeout: Duration,
-    env: BTreeMap<String, String>,
 ) -> SeekCodeResult<CommandResult> {
-    let mut command = Command::new(program);
+    let mut command = build_command(command_line);
     command
-        .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if stdin.is_some() {
-        command.stdin(Stdio::piped());
-    }
-    for (key, value) in env {
-        command.env(key, value);
-    }
 
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| SeekCodeError::Shell(error.to_string()))?;
-    if let Some(stdin) = stdin {
-        let mut child_stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| SeekCodeError::Shell("failed to open child stdin".to_string()))?;
-        child_stdin
-            .write_all(stdin.as_bytes())
-            .await
-            .map_err(|error| SeekCodeError::Shell(error.to_string()))?;
-        drop(child_stdin);
-    }
 
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(output) => output.map_err(|error| SeekCodeError::Shell(error.to_string()))?,
@@ -1125,7 +911,7 @@ mod tests {
         tokio::fs::write(root.join("hello.txt"), "hello world")
             .await
             .expect("write fixture");
-        let config = SystemToolConfig::new(&root).expect("config builds");
+        let config = SystemToolConfig::new();
         let tool = ReadFileTool::new(config);
 
         let output = tool
@@ -1145,46 +931,312 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_read_file_rejects_parent_escape() {
+    async fn system_read_file_uses_workspace_from_context() {
+        let first_root = make_temp_workspace();
+        let second_root = make_temp_workspace();
+        tokio::fs::write(first_root.join("hello.txt"), "first workspace")
+            .await
+            .expect("write first fixture");
+        tokio::fs::write(second_root.join("hello.txt"), "second workspace")
+            .await
+            .expect("write second fixture");
+        let tool = ReadFileTool::new(SystemToolConfig::new());
+
+        let first_output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(first_root.clone()),
+                },
+                json!({ "path": "hello.txt" }),
+            )
+            .await
+            .expect("read first workspace");
+        let second_output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(second_root.clone()),
+                },
+                json!({ "path": "hello.txt" }),
+            )
+            .await
+            .expect("read second workspace");
+
+        assert_eq!(first_output.content["content"], "first workspace");
+        assert_eq!(second_output.content["content"], "second workspace");
+        let _ = std::fs::remove_dir_all(first_root);
+        let _ = std::fs::remove_dir_all(second_root);
+    }
+
+    #[tokio::test]
+    async fn system_read_file_starts_at_requested_line_and_limits_output() {
         let root = make_temp_workspace();
-        let config = SystemToolConfig::new(&root).expect("config builds");
+        let content = (1..=5_010)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        tokio::fs::write(root.join("many.txt"), content)
+            .await
+            .expect("write fixture");
+        let config = SystemToolConfig::new();
         let tool = ReadFileTool::new(config);
 
-        let error = tool
+        let output = tool
             .execute(
                 ToolContext {
                     task_id: TaskId::new(),
                     workspace_id: None,
                     workspace_root: Some(root.clone()),
                 },
-                json!({ "path": "../outside.txt" }),
+                json!({ "path": "many.txt", "start_line": 3 }),
             )
             .await
-            .expect_err("escape is rejected");
+            .expect("read file");
 
-        assert!(matches!(error, SeekCodeError::PolicyDenied(_)));
+        let content = output.content["content"]
+            .as_str()
+            .expect("content is a string");
+        assert!(content.starts_with("line 3\n"));
+        assert!(content.ends_with("line 5002\n"));
+        assert_eq!(content.lines().count(), MAX_READ_FILE_LINES);
+        assert_eq!(output.content["start_line"], 3);
+        assert_eq!(output.content["end_line"], 5002);
+        assert_eq!(output.content["line_count"], MAX_READ_FILE_LINES);
+        assert_eq!(output.content["total_lines"], 5_010);
+        assert_eq!(output.content["truncated"], true);
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn system_tools_register_all_builtin_tools() {
+    #[tokio::test]
+    async fn system_read_file_reads_outside_workspace_via_absolute_path() {
+        // Tools are not restricted to the workspace root: an absolute path that
+        // points outside the workspace must resolve and read successfully.
         let root = make_temp_workspace();
-        let config = SystemToolConfig::new(&root).expect("config builds");
-        let registry = system_tool_registry(config).expect("registry builds");
+        let outside = make_temp_workspace();
+        let outside_file = outside.join("outside.txt");
+        tokio::fs::write(&outside_file, "outside content")
+            .await
+            .expect("write fixture");
+        let config = SystemToolConfig::new();
+        let tool = ReadFileTool::new(config);
 
-        for name in [
-            READ_FILE_TOOL,
-            WRITE_FILE_TOOL,
-            LIST_FILES_TOOL,
-            SEARCH_TEXT_TOOL,
-            APPLY_PATCH_TOOL,
-            RUN_COMMAND_TOOL,
-            GIT_STATUS_TOOL,
-            GIT_DIFF_TOOL,
-        ] {
-            assert!(registry.get(name).is_some(), "{name} should be registered");
-        }
+        let output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(root.clone()),
+                },
+                json!({ "path": outside_file.to_string_lossy() }),
+            )
+            .await
+            .expect("read outside file");
 
+        assert_eq!(output.content["content"], "outside content");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[tokio::test]
+    async fn system_read_file_reads_parent_relative_path() {
+        // A relative path that walks above the workspace root is now allowed.
+        let root = make_temp_workspace();
+        let parent = root.parent().expect("temp dir has a parent");
+        let sibling = parent.join(format!("seekcode-sibling-{}.txt", std::process::id()));
+        tokio::fs::write(&sibling, "sibling content")
+            .await
+            .expect("write fixture");
+        let relative =
+            PathBuf::from("..").join(sibling.file_name().expect("sibling has a file name"));
+        let config = SystemToolConfig::new();
+        let tool = ReadFileTool::new(config);
+
+        let output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(root.clone()),
+                },
+                json!({ "path": relative.to_string_lossy() }),
+            )
+            .await
+            .expect("read sibling file");
+
+        assert_eq!(output.content["content"], "sibling content");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(sibling);
+    }
+
+    #[tokio::test]
+    async fn system_insert_lines_inserts_content_after_requested_line() {
+        let root = make_temp_workspace();
+        let path = root.join("hello.txt");
+        tokio::fs::write(&path, "alpha\nomega\n")
+            .await
+            .expect("write fixture");
+        let config = SystemToolConfig::new();
+        let tool = InsertLinesTool::new(config);
+
+        let output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(root.clone()),
+                },
+                json!({ "path": "hello.txt", "line": 1, "content": "beta\n" }),
+            )
+            .await
+            .expect("insert content");
+
+        let updated = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read updated file");
+        assert_eq!(updated, "alpha\nbeta\nomega\n");
+        assert_eq!(output.content["line"], 1);
+        assert_eq!(output.content["inserted_bytes"], 5);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn system_insert_lines_supports_inserting_at_beginning() {
+        let root = make_temp_workspace();
+        let path = root.join("hello.txt");
+        tokio::fs::write(&path, "omega\n")
+            .await
+            .expect("write fixture");
+        let config = SystemToolConfig::new();
+        let tool = InsertLinesTool::new(config);
+
+        tool.execute(
+            ToolContext {
+                task_id: TaskId::new(),
+                workspace_id: None,
+                workspace_root: Some(root.clone()),
+            },
+            json!({ "path": "hello.txt", "line": 0, "content": "alpha\n" }),
+        )
+        .await
+        .expect("insert content");
+
+        let updated = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read updated file");
+        assert_eq!(updated, "alpha\nomega\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn system_search_text_streams_matches_and_skips_ignored_dirs() {
+        let root = make_temp_workspace();
+        tokio::fs::write(root.join("a.txt"), "alpha\nbeta needle here\ngamma")
+            .await
+            .expect("write a.txt");
+        tokio::fs::create_dir_all(root.join("sub"))
+            .await
+            .expect("create sub dir");
+        tokio::fs::write(root.join("sub").join("b.txt"), "needle at top\nno hit")
+            .await
+            .expect("write b.txt");
+        // Files under ignored directories must not be searched.
+        tokio::fs::create_dir_all(root.join("target"))
+            .await
+            .expect("create target dir");
+        tokio::fs::write(root.join("target").join("c.txt"), "needle ignored")
+            .await
+            .expect("write c.txt");
+        let config = SystemToolConfig::new();
+        let tool = SearchTextTool::new(config);
+
+        let output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(root.clone()),
+                },
+                json!({ "pattern": "needle" }),
+            )
+            .await
+            .expect("search runs");
+
+        let matches = output.content["matches"]
+            .as_array()
+            .expect("matches is an array");
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|item| item["text"]
+            .as_str()
+            .expect("text is a string")
+            .contains("needle")));
+        assert!(matches
+            .iter()
+            .any(|item| item["path"] == "a.txt" && item["line"] == 2));
+        assert!(matches
+            .iter()
+            .any(|item| item["path"] == "sub/b.txt" && item["line"] == 1));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn system_search_text_respects_match_limit() {
+        let root = make_temp_workspace();
+        tokio::fs::write(root.join("a.txt"), "needle\nneedle\nneedle")
+            .await
+            .expect("write a.txt");
+        let config = SystemToolConfig::new();
+        let tool = SearchTextTool::new(config);
+
+        let output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(root.clone()),
+                },
+                json!({ "pattern": "needle", "limit": 2 }),
+            )
+            .await
+            .expect("search runs");
+
+        assert_eq!(
+            output.content["matches"]
+                .as_array()
+                .expect("matches is an array")
+                .len(),
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn system_run_command_executes_via_powershell_on_windows() {
+        let root = make_temp_workspace();
+        let config = SystemToolConfig::new();
+        let tool = RunCommandTool::new(config);
+
+        let output = tool
+            .execute(
+                ToolContext {
+                    task_id: TaskId::new(),
+                    workspace_id: None,
+                    workspace_root: Some(root.clone()),
+                },
+                json!({ "command": "cmd /c echo seekcode" }),
+            )
+            .await
+            .expect("command runs");
+
+        assert!(output.content["stdout"]
+            .as_str()
+            .expect("stdout is a string")
+            .contains("seekcode"));
+        assert_eq!(output.content["exit_code"], 0);
         let _ = std::fs::remove_dir_all(root);
     }
 

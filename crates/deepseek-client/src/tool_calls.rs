@@ -1,8 +1,8 @@
 //! Tool call conversion helpers for DeepSeek payloads.
 
 use crate::dto::{DeepSeekFunctionCall, DeepSeekToolCall, DeepSeekUsage};
+use crate::{ToolCall, ToolSpec};
 use seekcode_common::{SeekCodeError, SeekCodeResult, TokenUsage, ToolCallId};
-use seekcode_model_provider::{ToolCall, ToolSpec};
 use serde_json::{json, Value};
 
 /// Converts provider-neutral tool specs into DeepSeek tool definitions.

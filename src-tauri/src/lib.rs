@@ -13,8 +13,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_agent_task,
             commands::cancel_agent_task,
-            commands::list_workspace,
-            commands::read_file,
             commands::get_sessions,
             commands::open_workspace,
             commands::list_visible_workspaces,
@@ -24,6 +22,8 @@ pub fn run() {
             commands::update_session_model,
             commands::delete_workspace_sessions,
             commands::list_session_messages,
+            commands::session_context_usage,
+            commands::session_model_call_stats,
             commands::load_app_settings,
             commands::fetch_provider_models,
             commands::save_app_settings

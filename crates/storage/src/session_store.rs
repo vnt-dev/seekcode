@@ -80,16 +80,24 @@ impl SessionStore for SqliteStorage {
         session_id: SessionId,
         model_provider: String,
         model: String,
+        thinking_enabled: bool,
+        reasoning_effort: Option<String>,
     ) -> SeekCodeResult<SessionRecord> {
         let result = sqlx::query(
             r#"
             UPDATE sessions
-            SET model_provider = ?1, model = ?2, updated_at = ?3
-            WHERE id = ?4
+            SET model_provider = ?1,
+                model = ?2,
+                thinking_enabled = ?3,
+                reasoning_effort = ?4,
+                updated_at = ?5
+            WHERE id = ?6
             "#,
         )
         .bind(model_provider)
         .bind(model)
+        .bind(bool_to_i64(thinking_enabled))
+        .bind(reasoning_effort)
         .bind(local_now_text())
         .bind(session_id.to_string())
         .execute(&self.pool)
@@ -103,7 +111,7 @@ impl SessionStore for SqliteStorage {
     async fn list_sessions(&self) -> SeekCodeResult<Vec<SessionRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, workspace_id, name, model_provider, model, thinking_enabled, reasoning_effort, created_at, updated_at
+            SELECT id, workspace_id, name, model_provider, model, thinking_enabled, reasoning_effort, last_input_tokens, created_at, updated_at
             FROM sessions
             ORDER BY updated_at DESC, created_at DESC
             "#,
@@ -121,7 +129,7 @@ impl SessionStore for SqliteStorage {
     ) -> SeekCodeResult<Vec<SessionRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, workspace_id, name, model_provider, model, thinking_enabled, reasoning_effort, created_at, updated_at
+            SELECT id, workspace_id, name, model_provider, model, thinking_enabled, reasoning_effort, last_input_tokens, created_at, updated_at
             FROM sessions
             WHERE workspace_id = ?1
             ORDER BY updated_at DESC, created_at DESC
@@ -212,6 +220,67 @@ impl SessionStore for SqliteStorage {
         rows.into_iter().map(session_message_from_row).collect()
     }
 
+    async fn list_session_messages_in_turn_range(
+        &self,
+        session_id: SessionId,
+        after_turn_sequence: i64,
+        before_turn_sequence: Option<i64>,
+    ) -> SeekCodeResult<Vec<SessionMessageRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, session_id, turn_sequence, role, content, reasoning_content, tool_calls, tool_call_id, created_at
+            FROM session_messages
+            WHERE session_id = ?1
+              AND turn_sequence > ?2
+              AND (?3 IS NULL OR turn_sequence < ?3)
+            ORDER BY turn_sequence ASC, created_at ASC, id ASC
+            "#,
+        )
+        .bind(session_id.to_string())
+        .bind(after_turn_sequence)
+        .bind(before_turn_sequence)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(session_message_from_row).collect()
+    }
+
+    async fn list_session_messages_page(
+        &self,
+        session_id: SessionId,
+        before_turn_sequence: Option<i64>,
+        turn_limit: i64,
+    ) -> SeekCodeResult<Vec<SessionMessageRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, session_id, turn_sequence, role, content, reasoning_content, tool_calls, tool_call_id, created_at
+            FROM session_messages
+            WHERE session_id = ?1
+              AND turn_sequence IN (
+                SELECT turn_sequence
+                FROM (
+                  SELECT DISTINCT turn_sequence
+                  FROM session_messages
+                  WHERE session_id = ?1
+                    AND (?2 IS NULL OR turn_sequence < ?2)
+                  ORDER BY turn_sequence DESC
+                  LIMIT ?3
+                )
+              )
+            ORDER BY turn_sequence ASC, created_at ASC, id ASC
+            "#,
+        )
+        .bind(session_id.to_string())
+        .bind(before_turn_sequence)
+        .bind(turn_limit.max(1))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(session_message_from_row).collect()
+    }
+
     async fn next_session_turn_sequence(&self, session_id: SessionId) -> SeekCodeResult<i64> {
         next_turn_sequence(&self.pool, session_id).await
     }
@@ -238,12 +307,35 @@ impl SessionStore for SqliteStorage {
 
         Ok(())
     }
+
+    async fn update_session_last_input_tokens(
+        &self,
+        session_id: SessionId,
+        last_input_tokens: i64,
+    ) -> SeekCodeResult<()> {
+        let result = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET last_input_tokens = ?1,
+                updated_at = ?2
+            WHERE id = ?3
+            "#,
+        )
+        .bind(last_input_tokens)
+        .bind(local_now_text())
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        ensure_affected(result.rows_affected(), "session", session_id)
+    }
 }
 
 async fn get_session(pool: &SqlitePool, session_id: SessionId) -> SeekCodeResult<SessionRecord> {
     let row = sqlx::query(
         r#"
-        SELECT id, workspace_id, name, model_provider, model, thinking_enabled, reasoning_effort, created_at, updated_at
+        SELECT id, workspace_id, name, model_provider, model, thinking_enabled, reasoning_effort, last_input_tokens, created_at, updated_at
         FROM sessions
         WHERE id = ?1
         "#,
@@ -319,6 +411,7 @@ fn session_from_row(row: sqlx::sqlite::SqliteRow) -> SeekCodeResult<SessionRecor
         model: row_get(&row, "model")?,
         thinking_enabled: i64_to_bool(row_get(&row, "thinking_enabled")?),
         reasoning_effort: row_get(&row, "reasoning_effort")?,
+        last_input_tokens: row_get(&row, "last_input_tokens")?,
         created_at: row_get(&row, "created_at")?,
         updated_at: row_get(&row, "updated_at")?,
     })

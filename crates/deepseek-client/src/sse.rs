@@ -2,16 +2,13 @@
 
 use crate::dto::{DeepSeekChatChunk, DeepSeekFunctionCall};
 use crate::tool_calls::decode_usage;
+use crate::{ChatChoiceChunk, ChatChunk, ChatDelta, ToolCallDelta};
 use seekcode_common::{SeekCodeError, SeekCodeResult};
-use seekcode_model_provider::{ChatChoiceChunk, ChatChunk, ChatDelta, ToolCallDelta};
 
-/// Parses one DeepSeek SSE data frame into provider-neutral chunks.
-pub fn parse_sse_frame(frame: &str) -> SeekCodeResult<Option<ChatChunk>> {
-    Ok(parse_sse_frame_choices(frame)?.into_iter().next())
-}
 
 /// Parses one DeepSeek SSE data frame into provider-neutral choice chunks.
 pub fn parse_sse_frame_choices(frame: &str) -> SeekCodeResult<Vec<ChatChunk>> {
+    // tracing::debug!("parse_sse_frame_choices {:?}", frame);
     let data = frame.trim();
     if data.is_empty() || data == "[DONE]" {
         return Ok(Vec::new());

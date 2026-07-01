@@ -1,9 +1,9 @@
-use crate::models::{ModelCallLogRecord, NewModelCallLog};
+use crate::models::{ModelCallLogRecord, NewModelCallLog, SessionModelCallStats};
 use crate::rows::{bool_to_i64, i64_to_bool, parse_id, row_get, storage_error};
 use crate::sqlite::SqliteStorage;
 use crate::traits::ModelCallLogStore;
 use async_trait::async_trait;
-use seekcode_common::SeekCodeResult;
+use seekcode_common::{SeekCodeResult, SessionId};
 
 #[async_trait]
 impl ModelCallLogStore for SqliteStorage {
@@ -43,6 +43,34 @@ impl ModelCallLogStore for SqliteStorage {
         .map_err(storage_error)?;
 
         get_model_call_log(self.pool(), log.id).await
+    }
+
+    async fn session_model_call_stats(
+        &self,
+        session_id: SessionId,
+    ) -> SeekCodeResult<SessionModelCallStats> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COUNT(*) AS call_count,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens
+            FROM model_call_logs
+            WHERE session_id = ?1
+            "#,
+        )
+        .bind(session_id.to_string())
+        .fetch_one(self.pool())
+        .await
+        .map_err(storage_error)?;
+
+        Ok(SessionModelCallStats {
+            call_count: row_get(&row, "call_count")?,
+            input_tokens: row_get(&row, "input_tokens")?,
+            output_tokens: row_get(&row, "output_tokens")?,
+            cache_hit_tokens: row_get(&row, "cache_hit_tokens")?,
+        })
     }
 }
 

@@ -18,11 +18,16 @@ pub struct AppSettings {
     pub api_key: String,
     /// Fast model used to generate empty chat titles.
     pub title_model: String,
+    /// Model context window size, expressed with an optional k/M suffix (e.g. "1M").
+    pub context_window: String,
     /// Models shown in the chat model selector.
     pub models: Vec<ModelSetting>,
     /// Additional DeepSeek/OpenAI-compatible model providers.
     pub providers: Vec<ModelProviderSetting>,
 }
+
+/// Default context window expression used when none is configured.
+pub const DEFAULT_CONTEXT_WINDOW_TEXT: &str = "1M";
 
 /// User-editable model provider entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,6 +82,7 @@ impl Default for AppSettings {
             base_url: "https://api.deepseek.com".to_string(),
             api_key: String::new(),
             title_model: "deepseek-v4-flash".to_string(),
+            context_window: DEFAULT_CONTEXT_WINDOW_TEXT.to_string(),
             models: default_models(),
             providers: Vec::new(),
         }
@@ -149,6 +155,11 @@ fn normalize_settings(settings: &mut AppSettings) {
     settings.title_model = settings.title_model.trim().to_string();
     if settings.title_model.is_empty() {
         settings.title_model = AppSettings::default().title_model;
+    }
+
+    settings.context_window = settings.context_window.trim().to_string();
+    if parse_context_window(&settings.context_window).is_none() {
+        settings.context_window = DEFAULT_CONTEXT_WINDOW_TEXT.to_string();
     }
 
     let mut models = Vec::new();
@@ -238,6 +249,35 @@ fn validate_settings(settings: &AppSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parses a context window expression such as "1M", "500k", or "64000" into a
+/// token count. The k/M suffix is case-insensitive; a bare number is accepted.
+pub fn parse_context_window(raw: &str) -> Option<u32> {
+    let text = raw.trim().to_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+
+    let (number_part, multiplier) = if let Some(rest) = text.strip_suffix('k') {
+        (rest, 1_000f64)
+    } else if let Some(rest) = text.strip_suffix('m') {
+        (rest, 1_000_000f64)
+    } else {
+        (text.as_str(), 1f64)
+    };
+
+    let value: f64 = number_part.trim().parse().ok()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+
+    let tokens = (value * multiplier).round();
+    if tokens < 1.0 {
+        return None;
+    }
+
+    Some(tokens.min(f64::from(u32::MAX)) as u32)
+}
+
 pub fn provider_connection(settings: &AppSettings, provider_id: &str) -> Option<(String, String)> {
     let provider_id = provider_id.trim();
     if provider_id.is_empty() || provider_id == DEFAULT_PROVIDER_ID {
@@ -283,5 +323,46 @@ fn normalize_models(models: Vec<ModelSetting>, fallback: Vec<ModelSetting>) -> V
         fallback
     } else {
         normalized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_context_window_handles_units_case_insensitively() {
+        assert_eq!(parse_context_window("1M"), Some(1_000_000));
+        assert_eq!(parse_context_window("1m"), Some(1_000_000));
+        assert_eq!(parse_context_window("500k"), Some(500_000));
+        assert_eq!(parse_context_window("500K"), Some(500_000));
+        assert_eq!(parse_context_window("1.5m"), Some(1_500_000));
+        assert_eq!(parse_context_window("64000"), Some(64_000));
+        assert_eq!(parse_context_window("  2M  "), Some(2_000_000));
+    }
+
+    #[test]
+    fn parse_context_window_rejects_invalid_values() {
+        assert_eq!(parse_context_window(""), None);
+        assert_eq!(parse_context_window("abc"), None);
+        assert_eq!(parse_context_window("0"), None);
+        assert_eq!(parse_context_window("-1M"), None);
+    }
+
+    #[test]
+    fn normalize_settings_resets_invalid_context_window_to_default() {
+        let mut settings = AppSettings {
+            context_window: "not-a-size".to_string(),
+            ..AppSettings::default()
+        };
+        normalize_settings(&mut settings);
+        assert_eq!(settings.context_window, DEFAULT_CONTEXT_WINDOW_TEXT);
+
+        let mut settings = AppSettings {
+            context_window: "256k".to_string(),
+            ..AppSettings::default()
+        };
+        normalize_settings(&mut settings);
+        assert_eq!(settings.context_window, "256k");
     }
 }
