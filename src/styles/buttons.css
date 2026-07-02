@@ -1,0 +1,57 @@
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+.save-button,
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-weight: 600;
+  transition: background var(--transition), border-color var(--transition),
+    box-shadow var(--transition), transform var(--transition-fast);
+}
+
+.save-button {
+  min-width: 86px;
+  padding: 0 14px;
+  color: #ffffff;
+  background: var(--accent);
+  box-shadow: var(--shadow-xs);
+}
+
+.save-button:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow-sm);
+}
+
+.save-button:active {
+  transform: translateY(1px);
+}
+
+.secondary-button {
+  min-width: 72px;
+  padding: 0 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+
+.secondary-button:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+}
+
+.secondary-button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.fetch-models-button.is-fetching svg {
+  animation: spin 1s linear infinite;
+}

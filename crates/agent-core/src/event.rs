@@ -1,10 +1,7 @@
 //! Agent loop events and the helpers used to publish them.
 
-use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, TaskId, TokenUsage, ToolCallId};
-use seekcode_tool_system::{
-    ToolOutput, INSERT_LINES_TOOL, READ_FILE_TOOL, RUN_COMMAND_TOOL, SEARCH_TEXT_TOOL,
-    WRITE_FILE_TOOL,
-};
+use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, TaskId, TokenUsage};
+use seekcode_tool_system::{ToolOutput, RUN_COMMAND_TOOL};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -45,19 +42,23 @@ pub enum AgentEvent {
         /// Number of tools exposed to the provider.
         tool_count: usize,
     },
-    /// One provider choice chunk was emitted.
-    ModelChoice {
+    /// A model request attempt failed and the same round will be retried.
+    ModelRequestRetrying {
         /// Persisted session identifier.
         session_id: SessionId,
         /// Task identifier.
         task_id: TaskId,
         /// One-based model round identifier within this task.
         round_id: u32,
-        /// Complete provider choice chunk.
-        choice: seekcode_deepseek_client::ChatChoiceChunk,
+        /// One-based retry count for this round.
+        retry_count: u32,
+        /// Maximum retry count for this round.
+        max_retries: u32,
+        /// Error text from the failed model request attempt.
+        error: String,
     },
-    /// Assistant emitted text.
-    AssistantToken {
+    /// Assistant message text deltas were emitted.
+    AssistantMessageDelta {
         /// Persisted session identifier.
         session_id: SessionId,
         /// Task identifier.
@@ -65,18 +66,9 @@ pub enum AgentEvent {
         /// One-based model round identifier within this task.
         round_id: u32,
         /// Assistant content delta.
-        text: String,
-    },
-    /// Assistant emitted reasoning text.
-    AssistantReasoning {
-        /// Persisted session identifier.
-        session_id: SessionId,
-        /// Task identifier.
-        task_id: TaskId,
-        /// One-based model round identifier within this task.
-        round_id: u32,
+        content: Option<String>,
         /// Assistant reasoning delta.
-        text: String,
+        reasoning_content: Option<String>,
     },
     /// Tool call execution is about to start.
     ToolCallStarted {
@@ -87,7 +79,7 @@ pub enum AgentEvent {
         /// One-based model round identifier within this task.
         round_id: u32,
         /// Tool call identifier.
-        tool_call_id: ToolCallId,
+        tool_call_id: String,
         /// Tool name.
         name: String,
         /// Raw JSON arguments.
@@ -104,7 +96,7 @@ pub enum AgentEvent {
         /// One-based model round identifier within this task.
         round_id: u32,
         /// Tool call identifier.
-        tool_call_id: ToolCallId,
+        tool_call_id: String,
         /// Tool name.
         name: String,
         /// Whether execution succeeded.
@@ -219,7 +211,7 @@ pub(crate) fn tool_finished_event(
     task_id: TaskId,
     session_id: SessionId,
     round_id: u32,
-    tool_call_id: ToolCallId,
+    tool_call_id: String,
     name: String,
     result: SeekCodeResult<ToolOutput>,
 ) -> AgentEvent {
@@ -250,7 +242,7 @@ pub(crate) fn tool_finished_event(
 }
 
 /// Formats tool arguments once in the backend so the UI does not parse tool-specific JSON.
-pub(crate) fn tool_call_display(name: &str, arguments: &Value) -> Option<ToolCallDisplay> {
+pub fn tool_call_display(name: &str, arguments: &Value) -> Option<ToolCallDisplay> {
     match name {
         RUN_COMMAND_TOOL => {
             let command = string_arg(arguments, "command")?;
@@ -261,99 +253,12 @@ pub(crate) fn tool_call_display(name: &str, arguments: &Value) -> Option<ToolCal
                 detail: command,
             })
         }
-        READ_FILE_TOOL => {
-            let path = string_arg(arguments, "path")?;
-            let start_line = integer_arg(arguments, "start_line").unwrap_or(1);
-            let preview = format!("path={path} start_line={start_line}");
-            Some(argument_display(
-                preview,
-                vec![("path", path), ("start_line", start_line.to_string())],
-            ))
-        }
-        WRITE_FILE_TOOL => {
-            let path = string_arg(arguments, "path")?;
-            let content = string_arg(arguments, "content").unwrap_or_default();
-            let create_dirs = bool_arg(arguments, "create_dirs").unwrap_or(false);
-            let preview = format!(
-                "path={path} lines={} create_dirs={create_dirs}",
-                text_line_count(&content)
-            );
-            Some(argument_display(
-                preview,
-                vec![
-                    ("path", path),
-                    ("create_dirs", create_dirs.to_string()),
-                    ("content", content),
-                ],
-            ))
-        }
-        INSERT_LINES_TOOL => {
-            let path = string_arg(arguments, "path")?;
-            let line = integer_arg(arguments, "line")?;
-            let content = string_arg(arguments, "content").unwrap_or_default();
-            let preview = format!(
-                "path={path} after_line={line} lines={}",
-                text_line_count(&content)
-            );
-            Some(argument_display(
-                preview,
-                vec![
-                    ("path", path),
-                    ("after_line", line.to_string()),
-                    ("content", content),
-                ],
-            ))
-        }
-        SEARCH_TEXT_TOOL => {
-            let pattern = string_arg(arguments, "pattern")?;
-            let path = string_arg(arguments, "path").unwrap_or_else(|| ".".to_string());
-            let limit = integer_arg(arguments, "limit")
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "*".to_string());
-            let preview = format!("pattern={pattern:?} path={path} limit={limit}");
-            Some(argument_display(
-                preview,
-                vec![("pattern", pattern), ("path", path), ("limit", limit)],
-            ))
-        }
         _ => None,
-    }
-}
-
-fn argument_display(preview: String, entries: Vec<(&'static str, String)>) -> ToolCallDisplay {
-    let mut detail = String::new();
-    for (index, (key, value)) in entries.into_iter().enumerate() {
-        if index > 0 {
-            detail.push('\n');
-        }
-        if value.contains('\n') {
-            detail.push_str(key);
-            detail.push_str(":\n");
-            detail.push_str(&value);
-        } else {
-            detail.push_str(key);
-            detail.push_str(": ");
-            detail.push_str(&value);
-        }
-    }
-
-    ToolCallDisplay {
-        title: "Arguments".to_string(),
-        preview,
-        detail,
     }
 }
 
 fn string_arg(arguments: &Value, key: &str) -> Option<String> {
     arguments.get(key)?.as_str().map(ToString::to_string)
-}
-
-fn integer_arg(arguments: &Value, key: &str) -> Option<i64> {
-    arguments.get(key)?.as_i64()
-}
-
-fn bool_arg(arguments: &Value, key: &str) -> Option<bool> {
-    arguments.get(key)?.as_bool()
 }
 
 fn first_line(value: &str) -> Option<String> {
@@ -363,10 +268,6 @@ fn first_line(value: &str) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToString::to_string)
-}
-
-fn text_line_count(value: &str) -> usize {
-    value.lines().count().max(1)
 }
 
 #[cfg(test)]
@@ -388,23 +289,5 @@ mod tests {
         assert_eq!(display.title, "Shell");
         assert_eq!(display.preview, "cargo test -p seekcode-agent-core");
         assert!(display.detail.contains("cargo check --workspace"));
-    }
-
-    #[test]
-    fn formats_file_tool_display_without_frontend_parsing() {
-        let display = tool_call_display(
-            INSERT_LINES_TOOL,
-            &json!({
-                "path": "src/main.jsx",
-                "line": 12,
-                "content": "first\nsecond"
-            }),
-        )
-        .expect("insert lines display");
-
-        assert_eq!(display.title, "Arguments");
-        assert_eq!(display.preview, "path=src/main.jsx after_line=12 lines=2");
-        assert!(display.detail.contains("after_line: 12"));
-        assert!(display.detail.contains("content:\nfirst\nsecond"));
     }
 }

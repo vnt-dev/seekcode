@@ -2,9 +2,7 @@
 
 use futures_util::StreamExt;
 use parking_lot::RwLock;
-use seekcode_common::{
-    ChatMessage, ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, ToolCallId,
-};
+use seekcode_common::{ChatMessage, ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId};
 use seekcode_deepseek_client::{ChatChunk, ChatRequest, ModelProvider, ToolCall};
 use seekcode_tool_system::{ToolContext, ToolRegistry};
 use std::collections::{BTreeMap, HashMap};
@@ -17,6 +15,8 @@ use crate::config::AgentConfig;
 use crate::context::{AgentContext, AgentContextPreparer};
 use crate::event::{publish, publish_state, tool_call_display, tool_finished_event, AgentEvent};
 use crate::task::{set_task_state, task_state, AgentState, AgentTask};
+
+const MAX_MODEL_REQUEST_RETRIES: u32 = 5;
 
 /// Owns the state required to run a single agent task to completion.
 pub(crate) struct AgentTaskRunner {
@@ -33,6 +33,25 @@ pub(crate) struct AgentTaskRunner {
 pub(crate) struct ToolCallRunResult {
     pub(crate) tool_call: ToolCall,
     pub(crate) result_content: String,
+}
+
+/// Data assembled from one successful model request attempt.
+struct ModelRoundAttemptResult {
+    round_content: String,
+    round_reasoning: String,
+    tool_results: Vec<ToolCallRunResult>,
+}
+
+/// Distinguishes retryable provider failures from fatal local runner failures.
+enum ModelRoundAttemptError {
+    Retryable(SeekCodeError),
+    Fatal(SeekCodeError),
+}
+
+/// Outcome of one model request attempt.
+enum ModelRoundAttemptOutcome {
+    Finished(ModelRoundAttemptResult),
+    Canceled,
 }
 
 impl AgentTaskRunner {
@@ -142,117 +161,83 @@ impl AgentTaskRunner {
 
         let mut messages = task_context.messages();
         for round_id in 1..=64 {
-            let chat_request = ChatRequest {
-                model: model.clone(),
-                messages: messages.clone(),
-                tools: tool_specs.clone(),
-                thinking,
-                reasoning_effort: reasoning_effort.clone(),
-                strict_tools: self.config.strict_tools,
-            };
-
-            publish(
-                &self.events,
-                AgentEvent::ModelRequestStarted {
-                    session_id,
-                    task_id,
-                    round_id,
+            let mut retry_count = 0;
+            let attempt_result = loop {
+                let chat_request = ChatRequest {
                     model: model.clone(),
-                    message_count: chat_request.messages.len(),
-                    tool_count: tool_specs.len(),
-                },
-            );
+                    messages: messages.clone(),
+                    tools: tool_specs.clone(),
+                    thinking,
+                    reasoning_effort: reasoning_effort.clone(),
+                    strict_tools: self.config.strict_tools,
+                };
 
-            let mut stream = self.provider.stream_chat(chat_request)?;
-            let mut final_usage = None;
-            let mut tool_calls = ToolCallAccumulator::default();
-            let mut tool_results = Vec::new();
-            let mut round_content = String::new();
-            let mut round_reasoning = String::new();
+                publish(
+                    &self.events,
+                    AgentEvent::ModelRequestStarted {
+                        session_id,
+                        task_id,
+                        round_id,
+                        model: model.clone(),
+                        message_count: chat_request.messages.len(),
+                        tool_count: tool_specs.len(),
+                    },
+                );
 
-            while let Some(chunk) = stream.next().await {
-                if task_state(&self.tasks, task_id).await? == AgentState::Canceled {
-                    return Ok(());
-                }
+                tracing::debug!(
+                    target: "seekcode_agent_core::runner",
+                    %session_id,
+                    %task_id,
+                    round_id,
+                    attempt = retry_count + 1,
+                    model = %model,
+                    message_count = chat_request.messages.len(),
+                    tool_count = tool_specs.len(),
+                    "starting streaming model request"
+                );
 
-                match chunk? {
-                    ChatChunk::Choice(mut choice) => {
-                        if let Some(text) = &choice.delta.content {
-                            round_content.push_str(text);
+                match self
+                    .run_model_round_attempt(task_id, session_id, round_id, chat_request)
+                    .await
+                {
+                    Ok(ModelRoundAttemptOutcome::Finished(result)) => break result,
+                    Ok(ModelRoundAttemptOutcome::Canceled) => return Ok(()),
+                    Err(ModelRoundAttemptError::Fatal(error)) => return Err(error),
+                    Err(ModelRoundAttemptError::Retryable(error)) => {
+                        if retry_count >= MAX_MODEL_REQUEST_RETRIES {
+                            return Err(error);
                         }
-                        if let Some(text) = &choice.delta.reasoning_content {
-                            round_reasoning.push_str(text);
-                        }
-                        tool_calls.apply_choice_delta(&mut choice);
-                        let should_run_tools =
-                            choice.finish_reason.as_deref() == Some("tool_calls");
-                        publish(
-                            &self.events,
-                            AgentEvent::ModelChoice {
-                                session_id,
-                                task_id,
-                                round_id,
-                                choice,
-                            },
-                        );
 
-                        if should_run_tools {
-                            for tool_call in tool_calls.take_completed()? {
-                                tool_results.push(
-                                    self.run_tool_call(task_id, session_id, round_id, tool_call)
-                                        .await?,
-                                );
-                            }
-                        }
-                    }
-                    ChatChunk::Content(text) => {
-                        round_content.push_str(&text);
-                        publish(
-                            &self.events,
-                            AgentEvent::AssistantToken {
-                                session_id,
-                                task_id,
-                                round_id,
-                                text,
-                            },
-                        );
-                    }
-                    ChatChunk::Reasoning(text) => {
-                        round_reasoning.push_str(&text);
-                        publish(
-                            &self.events,
-                            AgentEvent::AssistantReasoning {
-                                session_id,
-                                task_id,
-                                round_id,
-                                text,
-                            },
-                        );
-                    }
-                    ChatChunk::Usage(usage) => {
-                        final_usage = Some(usage);
-                    }
-                    ChatChunk::Finished => {
-                        let (assistant_message, tool_messages) = build_model_round_messages(
-                            round_content.clone(),
-                            round_reasoning.clone(),
-                            &tool_results,
+                        retry_count += 1;
+                        tracing::warn!(
+                            target: "seekcode_agent_core::runner",
+                            %session_id,
+                            %task_id,
+                            round_id,
+                            retry_count,
+                            max_retries = MAX_MODEL_REQUEST_RETRIES,
+                            %error,
+                            "streaming model request failed; retrying round"
                         );
                         publish(
                             &self.events,
-                            AgentEvent::ModelRoundFinished {
+                            AgentEvent::ModelRequestRetrying {
                                 session_id,
                                 task_id,
                                 round_id,
-                                assistant_message,
-                                tool_messages,
-                                usage: final_usage.clone(),
+                                retry_count,
+                                max_retries: MAX_MODEL_REQUEST_RETRIES,
+                                error: error.to_string(),
                             },
                         );
-                        break;
                     }
                 }
-            }
+            };
+            let ModelRoundAttemptResult {
+                round_content,
+                round_reasoning,
+                tool_results,
+            } = attempt_result;
 
             if task_state(&self.tasks, task_id).await? == AgentState::Canceled {
                 return Ok(());
@@ -271,16 +256,159 @@ impl AgentTaskRunner {
                 return Ok(());
             }
 
+            tracing::debug!(
+                target: "seekcode_agent_core::runner",
+                %session_id,
+                %task_id,
+                round_id,
+                tool_result_count = tool_results.len(),
+                message_count_before_append = messages.len(),
+                "appending tool results before next streaming model request"
+            );
             append_tool_results_to_context(
                 &mut messages,
                 round_content,
                 round_reasoning,
                 tool_results,
             );
+            tracing::debug!(
+                target: "seekcode_agent_core::runner",
+                %session_id,
+                %task_id,
+                current_round_id = round_id,
+                next_round_id = round_id + 1,
+                message_count_after_append = messages.len(),
+                "tool results appended; next round will send updated context"
+            );
         }
 
         Err(SeekCodeError::ModelProvider(
             "model requested too many tool rounds".to_string(),
+        ))
+    }
+
+    /// Runs one streaming model request attempt for a round.
+    async fn run_model_round_attempt(
+        &self,
+        task_id: TaskId,
+        session_id: SessionId,
+        round_id: u32,
+        chat_request: ChatRequest,
+    ) -> Result<ModelRoundAttemptOutcome, ModelRoundAttemptError> {
+        let mut stream = self
+            .provider
+            .stream_chat(chat_request)
+            .map_err(ModelRoundAttemptError::Retryable)?;
+        let mut final_usage = None;
+        let mut tool_calls = ToolCallAccumulator::default();
+        let mut tool_results = Vec::new();
+        let mut round_content = String::new();
+        let mut round_reasoning = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            if task_state(&self.tasks, task_id)
+                .await
+                .map_err(ModelRoundAttemptError::Fatal)?
+                == AgentState::Canceled
+            {
+                return Ok(ModelRoundAttemptOutcome::Canceled);
+            }
+
+            match chunk.map_err(ModelRoundAttemptError::Retryable)? {
+                ChatChunk::Choice(mut choice) => {
+                    let content_delta = choice.delta.content.clone();
+                    let reasoning_delta = choice.delta.reasoning_content.clone();
+                    if let Some(text) = &choice.delta.content {
+                        round_content.push_str(text);
+                    }
+                    if let Some(text) = &choice.delta.reasoning_content {
+                        round_reasoning.push_str(text);
+                    }
+                    tool_calls.apply_choice_delta(&mut choice);
+                    let should_run_tools = choice.finish_reason.as_deref() == Some("tool_calls");
+                    if content_delta.is_some() || reasoning_delta.is_some() {
+                        publish(
+                            &self.events,
+                            AgentEvent::AssistantMessageDelta {
+                                session_id,
+                                task_id,
+                                round_id,
+                                content: content_delta,
+                                reasoning_content: reasoning_delta,
+                            },
+                        );
+                    }
+
+                    if should_run_tools {
+                        for tool_call in tool_calls
+                            .take_completed()
+                            .map_err(ModelRoundAttemptError::Fatal)?
+                        {
+                            tool_results.push(
+                                self.run_tool_call(task_id, session_id, round_id, tool_call)
+                                    .await
+                                    .map_err(ModelRoundAttemptError::Fatal)?,
+                            );
+                        }
+                    }
+                }
+                ChatChunk::Content(text) => {
+                    round_content.push_str(&text);
+                    publish(
+                        &self.events,
+                        AgentEvent::AssistantMessageDelta {
+                            session_id,
+                            task_id,
+                            round_id,
+                            content: Some(text),
+                            reasoning_content: None,
+                        },
+                    );
+                }
+                ChatChunk::Reasoning(text) => {
+                    round_reasoning.push_str(&text);
+                    publish(
+                        &self.events,
+                        AgentEvent::AssistantMessageDelta {
+                            session_id,
+                            task_id,
+                            round_id,
+                            content: None,
+                            reasoning_content: Some(text),
+                        },
+                    );
+                }
+                ChatChunk::Usage(usage) => {
+                    final_usage = Some(usage);
+                }
+                ChatChunk::Finished => {
+                    let (assistant_message, tool_messages) = build_model_round_messages(
+                        round_content.clone(),
+                        round_reasoning.clone(),
+                        &tool_results,
+                    );
+                    publish(
+                        &self.events,
+                        AgentEvent::ModelRoundFinished {
+                            session_id,
+                            task_id,
+                            round_id,
+                            assistant_message,
+                            tool_messages,
+                            usage: final_usage.clone(),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        Ok(ModelRoundAttemptOutcome::Finished(
+            ModelRoundAttemptResult {
+                round_content,
+                round_reasoning,
+                tool_results,
+            },
         ))
     }
 
@@ -295,7 +423,7 @@ impl AgentTaskRunner {
         set_task_state(&self.tasks, task_id, AgentState::RunningTool).await?;
         publish_state(&self.events, session_id, task_id, AgentState::RunningTool);
 
-        let tool_call_id = tool_call.id;
+        let tool_call_id = tool_call.id.clone();
         let name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
         let display = tool_call_display(&name, &arguments);
@@ -316,7 +444,7 @@ impl AgentTaskRunner {
                 session_id,
                 task_id,
                 round_id,
-                tool_call_id,
+                tool_call_id: tool_call_id.clone(),
                 name: name.clone(),
                 arguments,
                 display,
@@ -369,7 +497,7 @@ impl AgentTaskRunner {
                         task_id,
                         session_id,
                         round_id,
-                        tool_call_id,
+                        tool_call_id.clone(),
                         name,
                         Ok(output),
                     ),
@@ -377,22 +505,20 @@ impl AgentTaskRunner {
                 content
             }
             Err(error) => {
+                // Return a structured failure payload to the model so it can recover or retry.
+                let content = tool_error_result_content(&error);
                 publish(
                     &self.events,
                     tool_finished_event(
                         task_id,
                         session_id,
                         round_id,
-                        tool_call_id,
+                        tool_call_id.clone(),
                         name,
                         Err(error),
                     ),
                 );
-                set_task_state(&self.tasks, task_id, AgentState::Thinking).await?;
-                publish_state(&self.events, session_id, task_id, AgentState::Thinking);
-                return Err(SeekCodeError::ToolExecution(
-                    "tool execution failed".to_string(),
-                ));
+                content
             }
         };
 
@@ -404,6 +530,15 @@ impl AgentTaskRunner {
             result_content,
         })
     }
+}
+
+/// Formats a failed tool execution as model-facing tool result content.
+fn tool_error_result_content(error: &SeekCodeError) -> String {
+    serde_json::json!({
+        "ok": false,
+        "error": error.to_string(),
+    })
+    .to_string()
 }
 
 /// Appends the assistant turn and tool results back into the running context.
@@ -447,7 +582,7 @@ pub(crate) fn build_model_round_messages(
     let mut tool_messages = Vec::with_capacity(tool_results.len());
     for result in tool_results {
         let mut message = ChatMessage::new(ChatRole::Tool, result.result_content.clone());
-        message.tool_call_id = Some(result.tool_call.id);
+        message.tool_call_id = Some(result.tool_call.id.clone());
         tool_messages.push(message);
     }
 
@@ -468,14 +603,19 @@ impl ToolCallAccumulator {
                 .partials
                 .entry(delta.index)
                 .or_insert_with(|| PartialToolCall {
-                    id: ToolCallId::new(),
-                    name: None,
+                    id: String::new(),
+                    name: String::new(),
                     arguments: String::new(),
                 });
-            delta.id = Some(partial.id);
+            if let Some(id) = &delta.id {
+                partial.id.push_str(id);
+            }
+            if !partial.id.is_empty() {
+                delta.id = Some(partial.id.clone());
+            }
 
             if let Some(name) = &delta.name {
-                partial.name = Some(name.clone());
+                partial.name.push_str(name);
             }
             if let Some(arguments) = &delta.arguments {
                 partial.arguments.push_str(arguments);
@@ -489,9 +629,16 @@ impl ToolCallAccumulator {
         partials
             .into_values()
             .map(|partial| {
-                let name = partial.name.ok_or_else(|| {
-                    SeekCodeError::ModelProvider("missing streamed tool call name".to_string())
-                })?;
+                if partial.id.is_empty() {
+                    return Err(SeekCodeError::ModelProvider(
+                        "missing streamed tool call id".to_string(),
+                    ));
+                }
+                if partial.name.is_empty() {
+                    return Err(SeekCodeError::ModelProvider(
+                        "missing streamed tool call name".to_string(),
+                    ));
+                }
                 let arguments = if partial.arguments.trim().is_empty() {
                     serde_json::Value::Object(Default::default())
                 } else {
@@ -504,7 +651,7 @@ impl ToolCallAccumulator {
 
                 Ok(ToolCall {
                     id: partial.id,
-                    name,
+                    name: partial.name,
                     arguments,
                 })
             })
@@ -514,7 +661,7 @@ impl ToolCallAccumulator {
 
 /// Partial tool call assembled across streamed deltas.
 struct PartialToolCall {
-    id: ToolCallId,
-    name: Option<String>,
+    id: String,
+    name: String,
     arguments: String,
 }

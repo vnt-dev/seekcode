@@ -1,0 +1,145 @@
+/* ==========================================================================
+   Markdown content
+   ========================================================================== */
+.message-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.markdown-content {
+  white-space: normal;
+  /* Break long unbreakable tokens (URLs, ids) so they never widen the transcript. */
+  overflow-wrap: anywhere;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote,
+.markdown-content pre,
+.markdown-content table {
+  margin: 0 0 10px;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  margin: 16px 0 8px;
+  color: var(--text);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  font-weight: 650;
+}
+
+.markdown-content h1 {
+  font-size: 22px;
+}
+
+.markdown-content h2 {
+  font-size: 19px;
+}
+
+.markdown-content h3 {
+  font-size: 16px;
+}
+
+.markdown-content h4 {
+  font-size: 14px;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  padding-left: 22px;
+}
+
+.markdown-content li + li {
+  margin-top: 4px;
+}
+
+.markdown-content blockquote {
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--accent-soft-border);
+  color: var(--text-secondary);
+}
+
+.markdown-content code {
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: #1d3a5f;
+  background: var(--accent-soft);
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+.message.is-assistant .message-content.markdown-content :not(pre) > code {
+  padding: 0 2px;
+  color: #17314f;
+  background: transparent;
+}
+
+.markdown-content pre {
+  overflow: auto;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.markdown-content pre code {
+  display: block;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  white-space: pre;
+}
+
+.markdown-content a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  transition: color var(--transition-fast);
+}
+
+.markdown-content a:hover {
+  color: var(--accent-hover);
+}
+
+.markdown-content table {
+  /* Block + overflow lets wide tables scroll internally instead of stretching
+     the transcript and creating a page-level horizontal scrollbar. */
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid var(--border);
+  padding: 6px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-content th {
+  background: var(--surface-muted);
+  font-weight: 650;
+}
+
+.message-block + .message-block {
+  margin-top: 10px;
+}

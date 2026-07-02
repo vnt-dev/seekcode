@@ -2,8 +2,15 @@ mod commands;
 mod config;
 mod state;
 
+use anyhow::{anyhow, Context, Result};
+use rolling_file::{BasicRollingFileAppender, RollingConditionBasic};
+use std::path::PathBuf;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _log_guard = init_file_logging().expect("failed to initialize file logging");
     let app_state = state::AppState::new().expect("failed to initialize app kernel");
 
     tauri::Builder::default()
@@ -30,4 +37,48 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn init_file_logging() -> Result<WorkerGuard> {
+    let logs_dir = seekcode_home_dir()?.join("logs");
+    if !logs_dir.exists() {
+        std::fs::create_dir_all(&logs_dir).context("failed to create logs directory")?;
+    }
+
+    let file_appender = BasicRollingFileAppender::new(
+        logs_dir.join("seekcode.log"),
+        RollingConditionBasic::new()
+            .daily()
+            .max_size(5 * 1024 * 1024),
+        10,
+    )
+    .context("failed to build RollingFileAppender")?;
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "info,seekcode=debug,seekcode_agent_core=debug,seekcode_app_kernel=debug,seekcode_deepseek_client=debug,seekcode_tool_system=debug,tower_http=debug".into()
+            }),
+        )
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .try_init()
+        .map_err(|error| anyhow!("failed to initialize tracing subscriber: {error}"))?;
+
+    tracing::info!(
+        target: "seekcode::logging",
+        path = %logs_dir.display(),
+        "file logging initialized"
+    );
+
+    Ok(guard)
+}
+
+fn seekcode_home_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .context("failed to resolve home directory")?;
+    Ok(home.join(".seekcode"))
 }

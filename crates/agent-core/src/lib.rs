@@ -13,7 +13,7 @@ pub use context::{
     AgentContext, AgentContextCompactionOutcome, AgentContextPrecheck, AgentContextPreparer,
     AgentHistoryMessage, AgentTaskContext, PreparedAgentContext,
 };
-pub use event::AgentEvent;
+pub use event::{tool_call_display, AgentEvent, ToolCallDisplay};
 pub use task::{AgentState, AgentTask, StartTaskRequest};
 
 #[cfg(test)]

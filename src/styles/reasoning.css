@@ -1,0 +1,111 @@
+/* ==========================================================================
+   Reasoning block
+   ========================================================================== */
+.reasoning {
+  margin: 0;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+}
+
+.reasoning summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  cursor: pointer;
+  color: var(--warning);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.reasoning-content {
+  padding: 0 11px 11px;
+  color: #6a561f;
+  font-size: 13px;
+}
+
+.reasoning-content.markdown-content h1,
+.reasoning-content.markdown-content h2,
+.reasoning-content.markdown-content h3,
+.reasoning-content.markdown-content h4 {
+  color: #5a3f13;
+}
+
+.reasoning-content.markdown-content blockquote {
+  border-left-color: #d7c590;
+  color: #6d5a2d;
+}
+
+.reasoning-content.markdown-content code {
+  color: #5a3f13;
+  background: #f4ead0;
+}
+
+.reasoning-content.markdown-content pre {
+  border-color: #e1d2a7;
+  background: #fff7de;
+}
+
+.reasoning-content.markdown-content th {
+  background: #f5e8c3;
+}
+
+.model-retry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+}
+
+.model-retry-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.model-retry code {
+  display: block;
+  max-width: 100%;
+  color: #8a2c2c;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.round-finished {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.round-finished svg {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.round-finished span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.round-finished span + span::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--text-muted);
+}

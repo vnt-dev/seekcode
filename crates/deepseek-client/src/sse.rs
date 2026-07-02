@@ -37,7 +37,7 @@ pub fn parse_sse_frame_choices(frame: &str) -> SeekCodeResult<Vec<ChatChunk>> {
                             .unwrap_or((None, None));
                         ToolCallDelta {
                             index: tool_delta.index,
-                            id: None,
+                            id: tool_delta.id,
                             kind: tool_delta.kind,
                             name,
                             arguments,

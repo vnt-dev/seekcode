@@ -1,0 +1,96 @@
+/* ==========================================================================
+   Design tokens
+   A single source of truth for color, elevation, radius, and motion so the
+   whole product reads as one cohesive, light-themed surface.
+   ========================================================================== */
+:root {
+  /* Neutral surfaces & text (cool slate scale) */
+  --bg: #f4f6f9;
+  --bg-gradient-top: #fbfcfe;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --surface-hover: #f1f5f9;
+  --surface-sunken: #eef2f7;
+
+  --border: #e6eaf0;
+  --border-strong: #d6dde6;
+
+  --text: #16202b;
+  --text-secondary: #5c6b7b;
+  --text-muted: #8a97a6;
+
+  /* Primary accent (calm, professional blue) */
+  --accent: #2f6fed;
+  --accent-hover: #2560d8;
+  --accent-active: #1f4fb8;
+  --accent-strong: #1c3f6e;
+  --accent-soft: #eef4fe;
+  --accent-soft-hover: #e3edfd;
+  --accent-soft-border: #d3e2fb;
+  --accent-ring: rgba(47, 111, 237, 0.18);
+
+  /* Semantic accents */
+  --success: #0f8a5f;
+  --success-soft: #ecfdf5;
+  --success-border: #b6e2cd;
+  --danger: #c8362f;
+  --danger-strong: #9c2f2f;
+  --danger-soft: #fdf1f1;
+  --danger-border: #f0cccc;
+  --warning: #8a6510;
+  --warning-soft: #fffaeb;
+  --warning-border: #ecdcae;
+
+  /* Elevation */
+  --shadow-xs: 0 1px 2px rgba(20, 33, 48, 0.05);
+  --shadow-sm: 0 1px 2px rgba(20, 33, 48, 0.05), 0 1px 3px rgba(20, 33, 48, 0.06);
+  --shadow-md: 0 6px 16px rgba(20, 33, 48, 0.08);
+  --shadow-lg: 0 16px 40px rgba(20, 33, 48, 0.14);
+  --shadow-xl: 0 24px 56px rgba(20, 33, 48, 0.18);
+
+  /* Radius scale */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-fast: 120ms var(--ease);
+  --transition: 160ms var(--ease);
+
+  color: var(--text);
+  background: var(--bg);
+  font-family:
+    "Inter var", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+button,
+textarea,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}

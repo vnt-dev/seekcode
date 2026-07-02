@@ -298,7 +298,8 @@ fn append_valid_tool_context_messages(
                 messages.push(message.clone());
             }
             ChatRole::Tool => {
-                let Some(tool_call_id) = message.tool_call_id.map(|id| id.to_string()) else {
+                let Some(tool_call_id) = message.tool_call_id.as_ref().map(ToString::to_string)
+                else {
                     tracing::warn!(
                         target: "seekcode_app_kernel::context",
                         %session_id,
@@ -339,7 +340,7 @@ fn following_tool_call_ids(messages: &[ChatMessage], start: usize) -> BTreeSet<S
         .iter()
         .skip(start)
         .take_while(|message| message.role == ChatRole::Tool)
-        .filter_map(|message| message.tool_call_id.map(|id| id.to_string()))
+        .filter_map(|message| message.tool_call_id.as_ref().map(ToString::to_string))
         .collect()
 }
 

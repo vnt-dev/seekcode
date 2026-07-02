@@ -1,4 +1,4 @@
-use crate::kernel::SessionService;
+use crate::session_service::SessionService;
 use seekcode_agent_core::AgentEvent;
 use seekcode_common::{ModelCallLogId, SessionId, TaskId, TokenUsage};
 use seekcode_storage::{local_now_text, NewModelCallLog};
@@ -24,69 +24,27 @@ pub(crate) fn spawn_session_agent_event_bridge(
 
         loop {
             match events.recv().await {
-                Some(AgentEvent::ModelChoice {
+                Some(AgentEvent::AssistantMessageDelta {
                     session_id: event_session_id,
                     task_id: event_task_id,
                     round_id,
-                    choice,
+                    content,
+                    reasoning_content,
                     ..
                 }) if event_task_id == task_id && event_session_id == session_id => {
-                    if let Err(error) = ui_events.send(AgentEvent::ModelChoice {
+                    if let Err(error) = ui_events.send(AgentEvent::AssistantMessageDelta {
                         session_id: event_session_id,
                         task_id: event_task_id,
                         round_id,
-                        choice,
+                        content,
+                        reasoning_content,
                     }) {
                         tracing::warn!(
                             target: "seekcode_app_kernel::agent_events",
                             %session_id,
                             %task_id,
                             %error,
-                            "failed to forward model choice event"
-                        );
-                    }
-                }
-                Some(AgentEvent::AssistantToken {
-                    task_id: event_task_id,
-                    session_id: event_session_id,
-                    round_id,
-                    text,
-                    ..
-                }) if event_task_id == task_id && event_session_id == session_id => {
-                    if let Err(error) = ui_events.send(AgentEvent::AssistantToken {
-                        session_id: event_session_id,
-                        task_id: event_task_id,
-                        round_id,
-                        text,
-                    }) {
-                        tracing::warn!(
-                            target: "seekcode_app_kernel::agent_events",
-                            %session_id,
-                            %task_id,
-                            %error,
-                            "failed to forward assistant token event"
-                        );
-                    }
-                }
-                Some(AgentEvent::AssistantReasoning {
-                    task_id: event_task_id,
-                    session_id: event_session_id,
-                    round_id,
-                    text,
-                    ..
-                }) if event_task_id == task_id && event_session_id == session_id => {
-                    if let Err(error) = ui_events.send(AgentEvent::AssistantReasoning {
-                        session_id: event_session_id,
-                        task_id: event_task_id,
-                        round_id,
-                        text,
-                    }) {
-                        tracing::warn!(
-                            target: "seekcode_app_kernel::agent_events",
-                            %session_id,
-                            %task_id,
-                            %error,
-                            "failed to forward assistant reasoning event"
+                            "failed to forward assistant message delta event"
                         );
                     }
                 }
@@ -152,6 +110,32 @@ pub(crate) fn spawn_session_agent_event_bridge(
                                 started_at: Instant::now(),
                                 called_at: local_now_text(),
                             });
+                        }
+                        AgentEvent::ModelRequestRetrying {
+                            round_id, error, ..
+                        } => {
+                            tracing::warn!(
+                                target: "seekcode_app_kernel::agent_events",
+                                %session_id,
+                                %task_id,
+                                round_id,
+                                %error,
+                                "model request attempt failed and will be retried"
+                            );
+                            if active_model_call
+                                .as_ref()
+                                .is_some_and(|call| call.round_id == *round_id)
+                            {
+                                let call = active_model_call.take().expect("active call exists");
+                                sessions
+                                    .append_model_call_log(call.into_new_log(
+                                        model_provider.clone(),
+                                        session_id,
+                                        false,
+                                        None,
+                                    ))
+                                    .await;
+                            }
                         }
                         AgentEvent::ModelRoundFinished {
                             round_id,
@@ -261,9 +245,8 @@ fn agent_event_task_id(event: &AgentEvent) -> Option<TaskId> {
         AgentEvent::TaskStarted { task_id, .. }
         | AgentEvent::StateChanged { task_id, .. }
         | AgentEvent::ModelRequestStarted { task_id, .. }
-        | AgentEvent::ModelChoice { task_id, .. }
-        | AgentEvent::AssistantToken { task_id, .. }
-        | AgentEvent::AssistantReasoning { task_id, .. }
+        | AgentEvent::ModelRequestRetrying { task_id, .. }
+        | AgentEvent::AssistantMessageDelta { task_id, .. }
         | AgentEvent::ToolCallStarted { task_id, .. }
         | AgentEvent::ToolCallFinished { task_id, .. }
         | AgentEvent::ModelRoundFinished { task_id, .. }
@@ -281,9 +264,8 @@ fn agent_event_session_id(event: &AgentEvent) -> Option<SessionId> {
         AgentEvent::TaskStarted { session_id, .. }
         | AgentEvent::StateChanged { session_id, .. }
         | AgentEvent::ModelRequestStarted { session_id, .. }
-        | AgentEvent::ModelChoice { session_id, .. }
-        | AgentEvent::AssistantToken { session_id, .. }
-        | AgentEvent::AssistantReasoning { session_id, .. }
+        | AgentEvent::ModelRequestRetrying { session_id, .. }
+        | AgentEvent::AssistantMessageDelta { session_id, .. }
         | AgentEvent::ToolCallStarted { session_id, .. }
         | AgentEvent::ToolCallFinished { session_id, .. }
         | AgentEvent::ModelRoundFinished { session_id, .. }

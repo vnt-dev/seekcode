@@ -1,7 +1,7 @@
 //! Context compression: fold older conversation rounds into a summary when the
 //! previous request's input tokens approach the model context window.
 
-use crate::kernel::SessionService;
+use crate::session_service::SessionService;
 use seekcode_agent_core::{AgentHistoryMessage, AgentTaskContext};
 use seekcode_common::{
     ChatMessage, ChatRole, ModelCallLogId, SeekCodeResult, SessionId, TokenUsage,
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Percentage of the context window at which compression is triggered.
-const COMPACTION_TRIGGER_PERCENT: i64 = 60;
+const COMPACTION_TRIGGER_PERCENT: i64 = 70;
 /// Number of most-recent conversation rounds kept fully expanded.
 pub(crate) const KEEP_RECENT_ROUNDS: usize = 3;
 
@@ -52,12 +52,13 @@ fn should_compact(last_input_tokens: i64, context_window: u32) -> bool {
 
 /// Plans which expanded history rounds to compress, keeping the most recent rounds.
 fn plan_compaction(sorted_turns: &[i64], keep_recent: usize) -> Option<CompactionPlan> {
-    if sorted_turns.len() <= keep_recent {
+    if sorted_turns.is_empty() {
         return None;
     }
 
-    // Highest turn that is NOT among the kept recent rounds.
-    let boundary_index = sorted_turns.len() - keep_recent - 1;
+    // Keep up to `keep_recent` latest rounds, but once compaction is triggered,
+    // always fold at least the oldest available round into the summary.
+    let boundary_index = sorted_turns.len().saturating_sub(keep_recent + 1);
     let compacted_through_turn = sorted_turns[boundary_index];
 
     let turns_to_compress: Vec<i64> = sorted_turns
@@ -129,11 +130,7 @@ pub(crate) async fn precheck_session_context_compaction(
     context: &AgentTaskContext,
 ) -> SeekCodeResult<bool> {
     let context_window = provider.model_profile(&model).await?.context_window;
-    if !should_compact(context.last_input_tokens, context_window) {
-        return Ok(false);
-    }
-
-    Ok(distinct_sorted_turns(&context.history_messages).len() > KEEP_RECENT_ROUNDS)
+    Ok(should_compact(context.last_input_tokens, context_window))
 }
 
 /// Compacts older rounds before the in-flight user turn.
@@ -361,16 +358,23 @@ mod tests {
     }
 
     #[test]
-    fn should_compact_respects_60_percent_threshold() {
-        // 64_000 * 60 / 100 = 38_400.
-        assert!(!should_compact(38_399, 64_000));
-        assert!(should_compact(38_400, 64_000));
-        assert!(should_compact(38_401, 64_000));
+    fn should_compact_respects_70_percent_threshold() {
+        // 64_000 * 70 / 100 = 44_800.
+        assert!(!should_compact(44_799, 64_000));
+        assert!(should_compact(44_800, 64_000));
+        assert!(should_compact(44_801, 64_000));
     }
 
     #[test]
-    fn plan_compaction_returns_none_when_within_kept_rounds() {
-        assert!(plan_compaction(&[1, 2, 3], KEEP_RECENT_ROUNDS).is_none());
+    fn plan_compaction_returns_none_without_history_rounds() {
+        assert!(plan_compaction(&[], KEEP_RECENT_ROUNDS).is_none());
+    }
+
+    #[test]
+    fn plan_compaction_compresses_one_round_when_within_kept_rounds() {
+        let plan = plan_compaction(&[1, 2, 3], KEEP_RECENT_ROUNDS).expect("a plan is produced");
+        assert_eq!(plan.compacted_through_turn, 1);
+        assert_eq!(plan.turns_to_compress, vec![1]);
     }
 
     #[test]
@@ -387,11 +391,14 @@ mod tests {
         let plan = plan_compaction(&[3, 4, 5, 6], KEEP_RECENT_ROUNDS).expect("a plan is produced");
         assert_eq!(plan.compacted_through_turn, 3);
         assert_eq!(plan.turns_to_compress, vec![3]);
+        assert_eq!(plan.turns_to_compress.len(), 1);
     }
 
     #[test]
-    fn plan_compaction_returns_none_without_extra_expanded_rounds() {
-        assert!(plan_compaction(&[4, 5, 6], KEEP_RECENT_ROUNDS).is_none());
+    fn plan_compaction_compresses_one_round_without_extra_expanded_rounds() {
+        let plan = plan_compaction(&[4, 5, 6], KEEP_RECENT_ROUNDS).expect("a plan is produced");
+        assert_eq!(plan.compacted_through_turn, 4);
+        assert_eq!(plan.turns_to_compress, vec![4]);
     }
 
     #[test]

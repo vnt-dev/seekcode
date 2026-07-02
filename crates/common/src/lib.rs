@@ -84,7 +84,6 @@ macro_rules! id_type {
 
 id_type!(SessionId);
 id_type!(TaskId);
-id_type!(ToolCallId);
 id_type!(WorkspaceId);
 id_type!(ModelCallLogId);
 
@@ -155,7 +154,7 @@ pub struct ChatMessage {
     /// Assistant tool calls attached to this message.
     pub tool_calls: Vec<Value>,
     /// Tool call identifier for tool result messages.
-    pub tool_call_id: Option<ToolCallId>,
+    pub tool_call_id: Option<String>,
     /// Creation timestamp.
     pub created_at: UtcDateTime,
 }
@@ -198,13 +197,13 @@ pub enum StreamEvent {
     /// Tool call has been requested.
     ToolCall {
         task_id: TaskId,
-        tool_call_id: ToolCallId,
+        tool_call_id: String,
         name: String,
     },
     /// Tool execution produced a result.
     ToolResult {
         task_id: TaskId,
-        tool_call_id: ToolCallId,
+        tool_call_id: String,
         ok: bool,
     },
     /// Task completed successfully.

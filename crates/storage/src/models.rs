@@ -1,4 +1,4 @@
-use seekcode_common::{ChatRole, ModelCallLogId, SessionId, TaskId, ToolCallId, WorkspaceId};
+use seekcode_common::{ChatRole, ModelCallLogId, SessionId, TaskId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -94,7 +94,7 @@ pub struct SessionMessageRecord {
     /// Assistant tool calls as provider-compatible JSON values.
     pub tool_calls: Vec<Value>,
     /// Tool call identifier for tool result messages.
-    pub tool_call_id: Option<ToolCallId>,
+    pub tool_call_id: Option<String>,
     /// Local creation timestamp formatted as yyyy-MM-dd HH:mm:ss.
     pub created_at: String,
 }
@@ -115,7 +115,7 @@ pub struct NewSessionMessage {
     /// Assistant tool calls as provider-compatible JSON values.
     pub tool_calls: Vec<Value>,
     /// Tool call identifier for tool result messages.
-    pub tool_call_id: Option<ToolCallId>,
+    pub tool_call_id: Option<String>,
     /// Local creation timestamp formatted as yyyy-MM-dd HH:mm:ss.
     pub created_at: String,
 }
@@ -139,7 +139,7 @@ pub struct AuditLogRecord {
     /// Associated task identifier.
     pub task_id: Option<TaskId>,
     /// Associated tool call identifier.
-    pub tool_call_id: Option<ToolCallId>,
+    pub tool_call_id: Option<String>,
     /// Event category.
     pub category: String,
     /// JSON event payload.
@@ -184,6 +184,10 @@ pub struct SessionModelCallStats {
     pub output_tokens: i64,
     /// Sum of provider cache-hit tokens across all calls.
     pub cache_hit_tokens: i64,
+    /// Average elapsed time for one model provider call in milliseconds.
+    pub average_call_elapsed_ms: i64,
+    /// Average elapsed time for one completed conversation turn in milliseconds.
+    pub average_turn_elapsed_ms: i64,
 }
 
 /// New model provider call telemetry row.

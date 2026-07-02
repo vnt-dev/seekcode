@@ -1,0 +1,308 @@
+/* ==========================================================================
+   Workspace stats panel
+   ========================================================================== */
+.workspace {
+  position: relative;
+  z-index: 190;
+  display: grid;
+  grid-template-rows: 72px auto minmax(0, 1fr);
+  border-width: 0 0 0 1px;
+}
+
+.workspace.is-collapsed {
+  display: flex;
+  justify-content: center;
+  padding-top: 16px;
+}
+
+.workspace-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.workspace-toggle:hover {
+  color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.stat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.stat-row span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.stat-row strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.metric-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.metric-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.metric-tile {
+  display: grid;
+  align-content: space-between;
+  min-height: 82px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.metric-tile.is-primary {
+  min-height: 72px;
+  border-color: var(--accent-soft-border);
+  background: linear-gradient(180deg, var(--surface), var(--accent-soft));
+}
+
+.metric-tile span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.metric-tile strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-tile:not(.is-primary) strong {
+  font-size: 20px;
+}
+
+.workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats-detail-section {
+  min-height: 0;
+  overflow: auto;
+  background: color-mix(in srgb, var(--surface-muted) 72%, var(--surface));
+}
+
+.cache-meter {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.cache-meter-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cache-meter-header span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.cache-meter-header strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.cache-meter-track {
+  overflow: hidden;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+}
+
+.cache-meter-track span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.timeline-section {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.detail-section {
+  min-height: 0;
+  border-bottom: 0;
+}
+
+.section-title {
+  margin-bottom: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.workspace-items {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.workspace-item strong {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.timeline {
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+  display: grid;
+  gap: 7px;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: start;
+  width: 100%;
+  min-height: 50px;
+  padding: 9px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.timeline-item.is-selected,
+.timeline-item:hover {
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-xs);
+}
+
+.timeline-item strong,
+.timeline-item span {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.timeline-item time {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.tone-active svg {
+  color: var(--warning);
+}
+
+.tone-success svg {
+  color: var(--success);
+}
+
+.tone-danger svg {
+  color: var(--danger);
+}
+
+.empty-state,
+.empty-detail {
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.empty-state {
+  gap: 8px;
+}
+
+.detail-section pre {
+  height: 200px;
+  margin: 0;
+  overflow: auto;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  background: var(--surface-muted);
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}

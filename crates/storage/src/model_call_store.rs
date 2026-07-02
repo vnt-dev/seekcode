@@ -52,12 +52,43 @@ impl ModelCallLogStore for SqliteStorage {
         let row = sqlx::query(
             r#"
             SELECT
-                COUNT(*) AS call_count,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens
-            FROM model_call_logs
-            WHERE session_id = ?1
+                (
+                    SELECT COUNT(*)
+                    FROM model_call_logs
+                    WHERE session_id = ?1
+                ) AS call_count,
+                (
+                    SELECT COALESCE(SUM(input_tokens), 0)
+                    FROM model_call_logs
+                    WHERE session_id = ?1
+                ) AS input_tokens,
+                (
+                    SELECT COALESCE(SUM(output_tokens), 0)
+                    FROM model_call_logs
+                    WHERE session_id = ?1
+                ) AS output_tokens,
+                (
+                    SELECT COALESCE(SUM(cache_hit_tokens), 0)
+                    FROM model_call_logs
+                    WHERE session_id = ?1
+                ) AS cache_hit_tokens,
+                (
+                    SELECT COALESCE(CAST(ROUND(AVG(elapsed_ms)) AS INTEGER), 0)
+                    FROM model_call_logs
+                    WHERE session_id = ?1
+                ) AS average_call_elapsed_ms,
+                (
+                    SELECT COALESCE(CAST(ROUND(AVG(turn_elapsed_ms)) AS INTEGER), 0)
+                    FROM (
+                        SELECT
+                            (julianday(MAX(created_at)) - julianday(MIN(created_at))) * 86400000
+                                AS turn_elapsed_ms
+                        FROM session_messages
+                        WHERE session_id = ?1
+                        GROUP BY turn_sequence
+                        HAVING COUNT(*) > 1
+                    )
+                ) AS average_turn_elapsed_ms
             "#,
         )
         .bind(session_id.to_string())
@@ -70,6 +101,8 @@ impl ModelCallLogStore for SqliteStorage {
             input_tokens: row_get(&row, "input_tokens")?,
             output_tokens: row_get(&row, "output_tokens")?,
             cache_hit_tokens: row_get(&row, "cache_hit_tokens")?,
+            average_call_elapsed_ms: row_get(&row, "average_call_elapsed_ms")?,
+            average_turn_elapsed_ms: row_get(&row, "average_turn_elapsed_ms")?,
         })
     }
 }

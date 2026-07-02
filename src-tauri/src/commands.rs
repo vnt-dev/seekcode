@@ -427,9 +427,8 @@ fn agent_event_task_id(event: &AgentEvent) -> Option<TaskId> {
         AgentEvent::TaskStarted { task_id, .. }
         | AgentEvent::StateChanged { task_id, .. }
         | AgentEvent::ModelRequestStarted { task_id, .. }
-        | AgentEvent::ModelChoice { task_id, .. }
-        | AgentEvent::AssistantToken { task_id, .. }
-        | AgentEvent::AssistantReasoning { task_id, .. }
+        | AgentEvent::ModelRequestRetrying { task_id, .. }
+        | AgentEvent::AssistantMessageDelta { task_id, .. }
         | AgentEvent::ToolCallStarted { task_id, .. }
         | AgentEvent::ToolCallFinished { task_id, .. }
         | AgentEvent::ModelRoundFinished { task_id, .. }
@@ -447,9 +446,8 @@ fn agent_event_session_id(event: &AgentEvent) -> Option<SessionId> {
         AgentEvent::TaskStarted { session_id, .. }
         | AgentEvent::StateChanged { session_id, .. }
         | AgentEvent::ModelRequestStarted { session_id, .. }
-        | AgentEvent::ModelChoice { session_id, .. }
-        | AgentEvent::AssistantToken { session_id, .. }
-        | AgentEvent::AssistantReasoning { session_id, .. }
+        | AgentEvent::ModelRequestRetrying { session_id, .. }
+        | AgentEvent::AssistantMessageDelta { session_id, .. }
         | AgentEvent::ToolCallStarted { session_id, .. }
         | AgentEvent::ToolCallFinished { session_id, .. }
         | AgentEvent::ModelRoundFinished { session_id, .. }

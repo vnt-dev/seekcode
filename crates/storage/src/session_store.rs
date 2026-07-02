@@ -7,7 +7,7 @@ use crate::sqlite::SqliteStorage;
 use crate::time::{local_now_text, utc_to_local_text};
 use crate::traits::SessionStore;
 use async_trait::async_trait;
-use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, ToolCallId, WorkspaceId};
+use seekcode_common::{ChatMessage, SeekCodeResult, SessionId, WorkspaceId};
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 
@@ -188,7 +188,7 @@ impl SessionStore for SqliteStorage {
         .bind(&message.content)
         .bind(&message.reasoning_content)
         .bind(serde_json::to_string(&message.tool_calls).map_err(storage_error)?)
-        .bind(message.tool_call_id.map(|id| id.to_string()))
+        .bind(message.tool_call_id)
         .bind(&message.created_at)
         .execute(&self.pool)
         .await
@@ -417,9 +417,7 @@ fn session_from_row(row: sqlx::sqlite::SqliteRow) -> SeekCodeResult<SessionRecor
 fn session_message_from_row(row: sqlx::sqlite::SqliteRow) -> SeekCodeResult<SessionMessageRecord> {
     let role = chat_role_from_str(row_get::<String>(&row, "role")?)?;
     let tool_calls = parse_tool_calls(row_get::<String>(&row, "tool_calls")?)?;
-    let tool_call_id = row_get::<Option<String>>(&row, "tool_call_id")?
-        .map(parse_id::<ToolCallId>)
-        .transpose()?;
+    let tool_call_id = row_get::<Option<String>>(&row, "tool_call_id")?;
 
     Ok(SessionMessageRecord {
         id: row_get(&row, "id")?,

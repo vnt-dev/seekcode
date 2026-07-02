@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
-use seekcode_common::{ChatMessage, SeekCodeResult, TokenUsage, ToolCallId};
+use seekcode_common::{ChatMessage, SeekCodeResult, TokenUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -68,7 +68,7 @@ pub struct ToolCallDelta {
     /// Tool call index in the assistant message.
     pub index: u32,
     /// Provider or local tool call identifier.
-    pub id: Option<ToolCallId>,
+    pub id: Option<String>,
     /// Tool call kind, normally "function".
     pub kind: Option<String>,
     /// Function name delta.
@@ -106,8 +106,8 @@ pub struct ToolSpec {
 /// Tool call requested by a model provider.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
-    /// Backend tool call identifier.
-    pub id: ToolCallId,
+    /// Provider or local tool call identifier.
+    pub id: String,
     /// Name of the requested tool.
     pub name: String,
     /// Raw JSON arguments.

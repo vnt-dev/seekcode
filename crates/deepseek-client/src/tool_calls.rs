@@ -2,7 +2,7 @@
 
 use crate::dto::{DeepSeekFunctionCall, DeepSeekToolCall, DeepSeekUsage};
 use crate::{ToolCall, ToolSpec};
-use seekcode_common::{SeekCodeError, SeekCodeResult, TokenUsage, ToolCallId};
+use seekcode_common::{SeekCodeError, SeekCodeResult, TokenUsage};
 use serde_json::{json, Value};
 
 /// Converts provider-neutral tool specs into DeepSeek tool definitions.
@@ -44,14 +44,16 @@ pub fn decode_function_call(
     let name = function.name.clone().ok_or_else(|| {
         SeekCodeError::ModelProvider("missing tool call function name".to_string())
     })?;
+    let id = id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SeekCodeError::ModelProvider("missing tool call id".to_string()))?;
     let arguments = function.arguments.as_deref().unwrap_or("{}");
     let arguments = serde_json::from_str(arguments).map_err(|error| {
         SeekCodeError::ModelProvider(format!("invalid tool arguments: {error}"))
     })?;
 
-    let _provider_id = id;
     Ok(ToolCall {
-        id: ToolCallId::new(),
+        id: id.to_string(),
         name,
         arguments,
     })

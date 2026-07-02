@@ -1,0 +1,179 @@
+/* ==========================================================================
+   Workspace & session navigation
+   ========================================================================== */
+.workspace-group.is-dragging .workspace-nav-header,
+.workspace-list.is-dragging-workspace .workspace-nav-header {
+  cursor: grabbing;
+}
+
+.workspace-nav-header,
+.session-item {
+  width: 100%;
+  display: grid;
+  align-items: center;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.workspace-nav-header {
+  grid-template-columns: 24px minmax(0, 1fr) 28px;
+  gap: 5px;
+  height: 34px;
+  padding: 0 9px 0 5px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+}
+
+.workspace-nav-header.is-active,
+.workspace-nav-header:hover,
+.workspace-nav-header:focus-visible,
+.session-item:hover,
+.session-item.is-selected {
+  background: var(--surface-hover);
+}
+
+.workspace-nav-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.workspace-nav-action {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.workspace-collapse-button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 26px;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.workspace-collapse-button:hover,
+.workspace-collapse-button:focus-visible {
+  color: var(--accent-strong);
+  background: var(--accent-soft-hover);
+  outline: none;
+}
+
+.workspace-nav-action:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft-hover);
+}
+
+.workspace-nav-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-nav-header:hover .workspace-nav-action,
+.workspace-nav-header:focus-within .workspace-nav-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.session-item {
+  grid-template-columns: 18px minmax(0, 1fr) auto 14px;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 9px 0 24px;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+}
+
+.session-item span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-item small {
+  grid-column: 3;
+}
+
+.session-item.is-selected {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.session-running-indicator {
+  grid-column: 4;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+}
+
+.session-running-indicator:empty {
+  visibility: hidden;
+}
+
+.session-running-indicator svg {
+  animation: spin 1s linear infinite;
+}
+
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: 64px;
+  padding: 0 14px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: auto;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-button:hover,
+.settings-button.is-active {
+  color: var(--accent-strong);
+  background: var(--surface-hover);
+}
+
+.settings-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

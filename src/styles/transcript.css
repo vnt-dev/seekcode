@@ -1,0 +1,171 @@
+/* ==========================================================================
+   Conversation & transcript
+   ========================================================================== */
+.conversation {
+  position: relative;
+  z-index: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.tool-chip.is-running svg:last-child {
+  animation: spin 1s linear infinite;
+}
+
+.transcript {
+  --transcript-padding-left: 22px;
+  --transcript-padding-right: 22px;
+
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  /* Horizontal padding only; vertical breathing room is provided by the
+     Virtuoso Header/Footer spacers so virtual scroll offsets stay accurate. */
+  padding: 0 var(--transcript-padding-right) 0 var(--transcript-padding-left);
+  scrollbar-color: rgba(102, 119, 137, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.transcript > [data-viewport-type="element"] {
+  /* Virtuoso positions its viewport after the left padding but gives it inline
+     width: 100%, so constrain it to the transcript content box. */
+  width: calc(100% - var(--transcript-padding-left) - var(--transcript-padding-right)) !important;
+}
+
+.transcript-spacer {
+  height: 22px;
+}
+
+.transcript::-webkit-scrollbar {
+  width: 10px;
+}
+
+.transcript::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.transcript::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--radius-full);
+  background: rgba(102, 119, 137, 0.18);
+  background-clip: content-box;
+}
+
+.transcript::-webkit-scrollbar-thumb:hover {
+  background: rgba(102, 119, 137, 0.3);
+  background-clip: content-box;
+}
+
+.message {
+  display: flex;
+  max-width: 880px;
+  margin: 0 auto 18px;
+}
+
+.message.is-user {
+  justify-content: flex-end;
+}
+
+.message-body {
+  min-width: 0;
+  max-width: min(720px, 82%);
+}
+
+.message.is-user .message-body {
+  padding: 11px 14px;
+  border: 1px solid var(--accent-soft-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: var(--shadow-xs);
+}
+
+.message.is-assistant .message-body {
+  max-width: min(780px, 88%);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.compaction-divider {
+  display: grid;
+  grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: min(520px, 100%);
+  min-width: 0;
+  min-height: 32px;
+  margin: 2px auto 16px;
+}
+
+.compaction-divider-line {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-strong) 22%, var(--border-strong) 78%, transparent);
+}
+
+.compaction-divider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.compaction-divider-text {
+  position: relative;
+}
+
+.compaction-divider.is-running .compaction-divider-text {
+  color: transparent;
+  background:
+    linear-gradient(90deg, var(--accent-strong) 0%, #7fb5e8 38%, #ffffff 50%, #7fb5e8 62%, var(--accent-strong) 100%);
+  background-size: 240% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  filter: drop-shadow(0 0 8px rgba(81, 145, 206, 0.42));
+  animation: compaction-text-shimmer 1.7s ease-in-out infinite;
+}
+
+.compaction-divider.is-done .compaction-divider-label {
+  color: var(--success);
+}
+
+.compaction-divider.is-done .compaction-divider-line {
+  background: linear-gradient(90deg, transparent, var(--success-border) 22%, var(--success-border) 78%, transparent);
+}
+
+.compaction-divider-size {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+@media (max-width: 520px) {
+  .compaction-divider {
+    grid-template-columns: minmax(12px, 1fr) auto minmax(12px, 1fr);
+    gap: 8px;
+  }
+
+  .compaction-divider-size {
+    display: none;
+  }
+}

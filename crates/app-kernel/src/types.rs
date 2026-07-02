@@ -1,11 +1,8 @@
-use crate::kernel::SessionService;
+use crate::session_service::SessionService;
 use parking_lot::RwLock;
 use seekcode_agent_core::{Agent, AgentEvent, AgentTask};
 use seekcode_common::{SessionId, WorkspaceId};
 use seekcode_deepseek_client::ModelProvider;
-use seekcode_policy::PolicyEngine;
-use seekcode_secrets::SecretStore;
-use seekcode_shell_sandbox::CommandRunner;
 use seekcode_storage::{SessionRecord, Storage, WorkspaceRecord};
 use seekcode_tool_system::ToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -55,16 +52,10 @@ pub struct AppServices {
     pub agent: Arc<Agent>,
     /// Tool registry.
     pub tools: Arc<ToolRegistry>,
-    /// Policy engine.
-    pub policy: Arc<dyn PolicyEngine>,
     /// Optional durable storage.
     pub storage: Option<Arc<dyn Storage>>,
     /// Session-level application service.
     pub sessions: Arc<SessionService>,
-    /// Secret storage.
-    pub secrets: Arc<dyn SecretStore>,
-    /// Command runner.
-    pub shell: Arc<CommandRunner>,
 }
 
 /// Started agent task plus the UI event stream for that task.

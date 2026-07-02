@@ -5,14 +5,8 @@ members = [
   "crates/deepseek-client",
   "crates/agent-core",
   "crates/tool-system",
-  "crates/patch-engine",
-  "crates/shell-sandbox",
-  "crates/policy",
   "crates/storage",
-  "crates/secrets",
   "crates/app-kernel",
-  "crates/mcp-client",
-  "crates/evals",
 ]
 resolver = "2"
 
@@ -28,14 +22,12 @@ async-trait = "0.1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 futures-util = "0.3"
-globset = "0.4"
 iana-time-zone = "0.1"
-ignore = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rolling-file = "0.2"
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-similar = "2"
 sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "chrono", "json"] }
 tauri = "2"
 tauri-build = "2"
@@ -44,6 +36,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "fs"] }
 toml = "0.8"
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ulid = { version = "1", features = ["serde"] }
 walkdir = "2"
@@ -53,11 +46,5 @@ seekcode-agent-core = { path = "crates/agent-core" }
 seekcode-app-kernel = { path = "crates/app-kernel" }
 seekcode-common = { path = "crates/common" }
 seekcode-deepseek-client = { path = "crates/deepseek-client" }
-seekcode-evals = { path = "crates/evals" }
-seekcode-mcp-client = { path = "crates/mcp-client" }
-seekcode-patch-engine = { path = "crates/patch-engine" }
-seekcode-policy = { path = "crates/policy" }
-seekcode-secrets = { path = "crates/secrets" }
-seekcode-shell-sandbox = { path = "crates/shell-sandbox" }
 seekcode-storage = { path = "crates/storage" }
 seekcode-tool-system = { path = "crates/tool-system" }

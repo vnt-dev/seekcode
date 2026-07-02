@@ -1,4 +1,4 @@
-use crate::kernel::SessionService;
+use crate::session_service::SessionService;
 use crate::SessionTitleChanged;
 use seekcode_common::{
     ChatMessage, ChatRole, ModelCallLogId, SeekCodeResult, SessionId, TokenUsage,

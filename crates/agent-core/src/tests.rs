@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream;
 use seekcode_common::{
-    ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, TokenUsage, ToolCallId, WorkspaceId,
+    ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, TokenUsage, WorkspaceId,
 };
 use seekcode_deepseek_client::{
     ChatChunk, ChatRequest, ChatResponse, ChatStream, ModelProfile, ModelProvider,
@@ -27,6 +27,26 @@ struct MockProvider {
 
 struct RoundProvider {
     rounds: std::sync::Mutex<std::collections::VecDeque<Vec<ChatChunk>>>,
+}
+
+struct RecordingRoundProvider {
+    rounds: std::sync::Mutex<std::collections::VecDeque<Vec<ChatChunk>>>,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+struct RetryProvider {
+    attempts: std::sync::Mutex<std::collections::VecDeque<ProviderAttempt>>,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+enum ProviderAttempt {
+    OpenError(String),
+    Stream(Vec<StreamItem>),
+}
+
+enum StreamItem {
+    Chunk(ChatChunk),
+    Error(String),
 }
 
 #[async_trait]
@@ -66,6 +86,71 @@ impl ModelProvider for RoundProvider {
             .into_iter()
             .map(Ok);
         Ok(Box::pin(stream::iter(chunks)))
+    }
+
+    async fn complete_chat(&self, _request: ChatRequest) -> SeekCodeResult<ChatResponse> {
+        todo!("mock complete_chat is not used by agent start_task tests")
+    }
+
+    async fn model_profile(&self, model: &str) -> SeekCodeResult<ModelProfile> {
+        Ok(ModelProfile {
+            id: model.to_string(),
+            context_window: 1_000,
+            supports_tools: true,
+            supports_thinking: true,
+        })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for RecordingRoundProvider {
+    fn stream_chat(&self, request: ChatRequest) -> SeekCodeResult<ChatStream> {
+        self.requests.lock().expect("requests lock").push(request);
+        let chunks = self
+            .rounds
+            .lock()
+            .expect("rounds lock")
+            .pop_front()
+            .unwrap_or_default()
+            .into_iter()
+            .map(Ok);
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+
+    async fn complete_chat(&self, _request: ChatRequest) -> SeekCodeResult<ChatResponse> {
+        todo!("mock complete_chat is not used by agent start_task tests")
+    }
+
+    async fn model_profile(&self, model: &str) -> SeekCodeResult<ModelProfile> {
+        Ok(ModelProfile {
+            id: model.to_string(),
+            context_window: 1_000,
+            supports_tools: true,
+            supports_thinking: true,
+        })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for RetryProvider {
+    fn stream_chat(&self, request: ChatRequest) -> SeekCodeResult<ChatStream> {
+        self.requests.lock().expect("requests lock").push(request);
+        let attempt = self
+            .attempts
+            .lock()
+            .expect("attempts lock")
+            .pop_front()
+            .unwrap_or_else(|| ProviderAttempt::Stream(Vec::new()));
+        match attempt {
+            ProviderAttempt::OpenError(error) => Err(SeekCodeError::ModelProvider(error)),
+            ProviderAttempt::Stream(items) => {
+                let chunks = items.into_iter().map(|item| match item {
+                    StreamItem::Chunk(chunk) => Ok(chunk),
+                    StreamItem::Error(error) => Err(SeekCodeError::ModelProvider(error)),
+                });
+                Ok(Box::pin(stream::iter(chunks)))
+            }
+        }
     }
 
     async fn complete_chat(&self, _request: ChatRequest) -> SeekCodeResult<ChatResponse> {
@@ -193,7 +278,7 @@ async fn start_task_publishes_stream_events() {
         .expect("task starts");
 
     let mut saw_started = false;
-    let mut saw_token = false;
+    let mut saw_message_delta = false;
     let mut saw_round_finished = false;
     let mut saw_finished = false;
     for _ in 0..20 {
@@ -202,10 +287,12 @@ async fn start_task_publishes_stream_events() {
             AgentEvent::TaskStarted { task_id, .. } if task_id == task.id => {
                 saw_started = true;
             }
-            AgentEvent::AssistantToken { task_id, text, .. }
-                if task_id == task.id && text == "hello" =>
-            {
-                saw_token = true;
+            AgentEvent::AssistantMessageDelta {
+                task_id,
+                content: Some(text),
+                ..
+            } if task_id == task.id && text == "hello" => {
+                saw_message_delta = true;
             }
             AgentEvent::ModelRoundFinished {
                 task_id,
@@ -228,7 +315,7 @@ async fn start_task_publishes_stream_events() {
     }
 
     assert!(saw_started);
-    assert!(saw_token);
+    assert!(saw_message_delta);
     assert!(saw_round_finished);
     assert!(saw_finished);
 }
@@ -287,6 +374,158 @@ async fn start_task_with_messages_and_tools_publishes_tool_count() {
 }
 
 #[tokio::test]
+async fn start_task_retries_when_model_stream_open_fails() {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut attempts = std::collections::VecDeque::new();
+    attempts.push_back(ProviderAttempt::OpenError("temporary outage".to_string()));
+    attempts.push_back(ProviderAttempt::Stream(vec![
+        StreamItem::Chunk(ChatChunk::Content("done".to_string())),
+        StreamItem::Chunk(ChatChunk::Finished),
+    ]));
+    let agent = Agent::new(
+        AgentConfig::default(),
+        Arc::new(RetryProvider {
+            attempts: std::sync::Mutex::new(attempts),
+            requests: Arc::clone(&requests),
+        }),
+        Arc::new(ToolRegistry::new()),
+    );
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+
+    let task = agent
+        .start_task_with_messages_tools_and_context_preparer(
+            StartTaskRequest {
+                session_id: SessionId::new(),
+                prompt: "Retry model".to_string(),
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+            },
+            task_context("Retry model"),
+            Arc::new(ToolRegistry::new()),
+            event_sender,
+            None,
+        )
+        .await
+        .expect("task starts");
+
+    let mut saw_retry = false;
+    let mut saw_final_delta = false;
+    for _ in 0..20 {
+        let event = events.recv().await.expect("event is published");
+        match event {
+            AgentEvent::ModelRequestRetrying {
+                task_id,
+                round_id,
+                retry_count,
+                max_retries,
+                error,
+                ..
+            } if task_id == task.id => {
+                assert_eq!(round_id, 1);
+                assert_eq!(retry_count, 1);
+                assert_eq!(max_retries, 5);
+                assert!(error.contains("temporary outage"));
+                saw_retry = true;
+            }
+            AgentEvent::AssistantMessageDelta {
+                task_id,
+                content: Some(text),
+                ..
+            } if task_id == task.id && text == "done" => {
+                saw_final_delta = true;
+            }
+            AgentEvent::Failed { task_id, error, .. } if task_id == task.id => {
+                panic!("model request should retry instead of failing immediately: {error}");
+            }
+            AgentEvent::Finished { task_id, .. } if task_id == task.id => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_retry);
+    assert!(saw_final_delta);
+    assert_eq!(requests.lock().expect("requests lock").len(), 2);
+}
+
+#[tokio::test]
+async fn start_task_retries_stream_chunk_failure_and_discards_partial_round_data() {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut attempts = std::collections::VecDeque::new();
+    attempts.push_back(ProviderAttempt::Stream(vec![
+        StreamItem::Chunk(ChatChunk::Content("partial".to_string())),
+        StreamItem::Error("stream disconnected".to_string()),
+    ]));
+    attempts.push_back(ProviderAttempt::Stream(vec![
+        StreamItem::Chunk(ChatChunk::Content("final".to_string())),
+        StreamItem::Chunk(ChatChunk::Finished),
+    ]));
+    let agent = Agent::new(
+        AgentConfig::default(),
+        Arc::new(RetryProvider {
+            attempts: std::sync::Mutex::new(attempts),
+            requests: Arc::clone(&requests),
+        }),
+        Arc::new(ToolRegistry::new()),
+    );
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+
+    let task = agent
+        .start_task_with_messages_tools_and_context_preparer(
+            StartTaskRequest {
+                session_id: SessionId::new(),
+                prompt: "Retry stream".to_string(),
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+            },
+            task_context("Retry stream"),
+            Arc::new(ToolRegistry::new()),
+            event_sender,
+            None,
+        )
+        .await
+        .expect("task starts");
+
+    let mut saw_partial_delta = false;
+    let mut saw_retry = false;
+    let mut finished_content = None;
+    for _ in 0..30 {
+        let event = events.recv().await.expect("event is published");
+        match event {
+            AgentEvent::AssistantMessageDelta {
+                task_id,
+                content: Some(text),
+                ..
+            } if task_id == task.id && text == "partial" => {
+                saw_partial_delta = true;
+            }
+            AgentEvent::ModelRequestRetrying { task_id, error, .. } if task_id == task.id => {
+                assert!(error.contains("stream disconnected"));
+                saw_retry = true;
+            }
+            AgentEvent::ModelRoundFinished {
+                task_id,
+                assistant_message,
+                ..
+            } if task_id == task.id => {
+                finished_content = Some(assistant_message.content);
+            }
+            AgentEvent::Failed { task_id, error, .. } if task_id == task.id => {
+                panic!("stream failure should retry instead of failing immediately: {error}");
+            }
+            AgentEvent::Finished { task_id, .. } if task_id == task.id => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_partial_delta);
+    assert!(saw_retry);
+    assert_eq!(finished_content.as_deref(), Some("final"));
+    assert_eq!(requests.lock().expect("requests lock").len(), 2);
+}
+
+#[tokio::test]
 async fn start_task_continues_after_tool_result() {
     let workspace_root =
         std::env::temp_dir().join(format!("seekcode-agent-core-search-{}", WorkspaceId::new()));
@@ -301,10 +540,24 @@ async fn start_task_continues_after_tool_result() {
                 reasoning_content: None,
                 tool_calls: vec![seekcode_deepseek_client::ToolCallDelta {
                     index: 0,
-                    id: None,
+                    id: Some("call_".to_string()),
                     kind: Some("function".to_string()),
-                    name: Some(seekcode_tool_system::SEARCH_TEXT_TOOL.to_string()),
-                    arguments: Some(r#"{"pattern":"needle"}"#.to_string()),
+                    name: Some("run_c".to_string()),
+                    arguments: Some(r#"{"command":"echo"#.to_string()),
+                }],
+            },
+            finish_reason: None,
+        }),
+        ChatChunk::Choice(seekcode_deepseek_client::ChatChoiceChunk {
+            delta: seekcode_deepseek_client::ChatDelta {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![seekcode_deepseek_client::ToolCallDelta {
+                    index: 0,
+                    id: Some("cmd_".to_string()),
+                    kind: None,
+                    name: Some("ommand".to_string()),
+                    arguments: Some(r#" hello"}"#.to_string()),
                 }],
             },
             finish_reason: Some("tool_calls".to_string()),
@@ -353,13 +606,32 @@ async fn start_task_continues_after_tool_result() {
         .expect("task starts");
 
     let mut saw_tool_finished = false;
+    let mut saw_tool_started_with_display = false;
     let mut saw_tool_round_finished = false;
     let mut saw_second_round = false;
-    let mut saw_final_text = false;
+    let mut saw_final_delta = false;
     for _ in 0..30 {
         let event = events.recv().await.expect("event is published");
         match event {
+            AgentEvent::ToolCallStarted {
+                task_id,
+                tool_call_id,
+                name,
+                display,
+                ..
+            } if task_id == task.id => {
+                assert_eq!(name, seekcode_tool_system::RUN_COMMAND_TOOL);
+                let display = display.expect("tool display is available when tool starts");
+                assert_eq!(tool_call_id, "call_cmd_");
+                assert_eq!(display.title, "Shell");
+                assert!(display.preview.contains("echo hello"));
+                saw_tool_started_with_display = true;
+            }
             AgentEvent::ToolCallFinished { task_id, ok, .. } if task_id == task.id && ok => {
+                assert!(
+                    saw_tool_started_with_display,
+                    "tool display should be published before the tool finishes"
+                );
                 saw_tool_finished = true;
             }
             AgentEvent::ModelRoundFinished {
@@ -382,10 +654,12 @@ async fn start_task_continues_after_tool_result() {
             } if task_id == task.id => {
                 saw_second_round = true;
             }
-            AgentEvent::AssistantToken { task_id, text, .. }
-                if task_id == task.id && text == "done" =>
-            {
-                saw_final_text = true;
+            AgentEvent::AssistantMessageDelta {
+                task_id,
+                content: Some(text),
+                ..
+            } if task_id == task.id && text == "done" => {
+                saw_final_delta = true;
             }
             AgentEvent::Finished { task_id, .. } if task_id == task.id => break,
             _ => {}
@@ -393,15 +667,123 @@ async fn start_task_continues_after_tool_result() {
     }
 
     assert!(saw_tool_finished);
+    assert!(saw_tool_started_with_display);
     assert!(saw_tool_round_finished);
     assert!(saw_second_round);
-    assert!(saw_final_text);
+    assert!(saw_final_delta);
     let _ = std::fs::remove_dir_all(workspace_root);
+}
+
+#[tokio::test]
+async fn start_task_returns_failed_tool_result_to_model() {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut rounds = std::collections::VecDeque::new();
+    rounds.push_back(vec![
+        ChatChunk::Choice(seekcode_deepseek_client::ChatChoiceChunk {
+            delta: seekcode_deepseek_client::ChatDelta {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![seekcode_deepseek_client::ToolCallDelta {
+                    index: 0,
+                    id: Some("call_missing".to_string()),
+                    kind: Some("function".to_string()),
+                    name: Some("missing_tool".to_string()),
+                    arguments: Some(r#"{"value":true}"#.to_string()),
+                }],
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        }),
+        ChatChunk::Finished,
+    ]);
+    rounds.push_back(vec![
+        ChatChunk::Content("recovered".to_string()),
+        ChatChunk::Finished,
+    ]);
+    let agent = Agent::new(
+        AgentConfig::default(),
+        Arc::new(RecordingRoundProvider {
+            rounds: std::sync::Mutex::new(rounds),
+            requests: Arc::clone(&requests),
+        }),
+        Arc::new(ToolRegistry::new()),
+    );
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+
+    let task = agent
+        .start_task_with_messages_tools_and_context_preparer(
+            StartTaskRequest {
+                session_id: SessionId::new(),
+                prompt: "Use a missing tool".to_string(),
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+            },
+            task_context("Use a missing tool"),
+            Arc::new(ToolRegistry::new()),
+            event_sender,
+            None,
+        )
+        .await
+        .expect("task starts");
+
+    let mut saw_failed_tool_event = false;
+    let mut saw_second_round = false;
+    let mut saw_final_delta = false;
+    for _ in 0..30 {
+        let event = events.recv().await.expect("event is published");
+        match event {
+            AgentEvent::ToolCallFinished {
+                task_id, ok, error, ..
+            } if task_id == task.id && !ok => {
+                let error = error.expect("failed tool event includes error");
+                assert!(error.contains("missing_tool"));
+                saw_failed_tool_event = true;
+            }
+            AgentEvent::ModelRequestStarted {
+                task_id,
+                round_id: 2,
+                ..
+            } if task_id == task.id => {
+                saw_second_round = true;
+            }
+            AgentEvent::AssistantMessageDelta {
+                task_id,
+                content: Some(text),
+                ..
+            } if task_id == task.id && text == "recovered" => {
+                saw_final_delta = true;
+            }
+            AgentEvent::Failed { task_id, error, .. } if task_id == task.id => {
+                panic!("tool failure should be returned to the model, not fail the task: {error}");
+            }
+            AgentEvent::Finished { task_id, .. } if task_id == task.id => break,
+            _ => {}
+        }
+    }
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 2);
+    let tool_message = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == ChatRole::Tool)
+        .expect("second request includes failed tool result");
+    assert_eq!(tool_message.tool_call_id.as_deref(), Some("call_missing"));
+    let content: serde_json::Value =
+        serde_json::from_str(&tool_message.content).expect("tool failure content is json");
+    assert_eq!(content["ok"], false);
+    assert!(content["error"]
+        .as_str()
+        .expect("error is a string")
+        .contains("missing_tool"));
+    assert!(saw_failed_tool_event);
+    assert!(saw_second_round);
+    assert!(saw_final_delta);
 }
 
 #[test]
 fn append_tool_results_preserves_assistant_reasoning_for_next_round() {
-    let tool_call_id = ToolCallId::new();
+    let tool_call_id = "call_reasoning".to_string();
     let mut messages = Vec::new();
 
     append_tool_results_to_context(
@@ -410,9 +792,9 @@ fn append_tool_results_preserves_assistant_reasoning_for_next_round() {
         "I need to inspect the workspace.".to_string(),
         vec![ToolCallRunResult {
             tool_call: seekcode_deepseek_client::ToolCall {
-                id: tool_call_id,
-                name: seekcode_tool_system::SEARCH_TEXT_TOOL.to_string(),
-                arguments: serde_json::json!({ "pattern": "needle", "path": "." }),
+                id: tool_call_id.clone(),
+                name: seekcode_tool_system::RUN_COMMAND_TOOL.to_string(),
+                arguments: serde_json::json!({ "path": "fixture.txt" }),
             },
             result_content: "[]".to_string(),
         }],

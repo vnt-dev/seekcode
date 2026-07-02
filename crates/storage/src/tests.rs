@@ -439,8 +439,10 @@ async fn session_model_call_stats_aggregates_rows() {
         .expect("empty stats");
     assert_eq!(empty.call_count, 0);
     assert_eq!(empty.input_tokens, 0);
+    assert_eq!(empty.average_call_elapsed_ms, 0);
+    assert_eq!(empty.average_turn_elapsed_ms, 0);
 
-    for (input, output, cache) in [(100, 40, 30), (200, 60, 50)] {
+    for (input, output, cache, elapsed_ms) in [(100, 40, 30, 1_000), (200, 60, 50, 3_000)] {
         storage
             .append_model_call_log(crate::NewModelCallLog {
                 id: ModelCallLogId::new(),
@@ -450,13 +452,57 @@ async fn session_model_call_stats_aggregates_rows() {
                 input_tokens: input,
                 output_tokens: output,
                 cache_hit_tokens: cache,
-                elapsed_ms: 10,
+                elapsed_ms,
                 success: true,
                 called_at: local_now_text(),
             })
             .await
             .expect("append model call log");
     }
+    for (turn_sequence, start, end) in [
+        (1, "2026-07-02 10:00:00", "2026-07-02 10:00:02"),
+        (2, "2026-07-02 10:01:00", "2026-07-02 10:01:06"),
+    ] {
+        storage
+            .append_session_message(NewSessionMessage {
+                session_id,
+                turn_sequence,
+                role: ChatRole::User,
+                content: "Question".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                created_at: start.to_string(),
+            })
+            .await
+            .expect("append user message");
+        storage
+            .append_session_message(NewSessionMessage {
+                session_id,
+                turn_sequence,
+                role: ChatRole::Assistant,
+                content: "Answer".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                created_at: end.to_string(),
+            })
+            .await
+            .expect("append assistant message");
+    }
+    storage
+        .append_session_message(NewSessionMessage {
+            session_id,
+            turn_sequence: 3,
+            role: ChatRole::User,
+            content: "Incomplete".to_string(),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            created_at: "2026-07-02 10:02:00".to_string(),
+        })
+        .await
+        .expect("append incomplete turn");
 
     let stats = storage
         .session_model_call_stats(session_id)
@@ -466,6 +512,8 @@ async fn session_model_call_stats_aggregates_rows() {
     assert_eq!(stats.input_tokens, 300);
     assert_eq!(stats.output_tokens, 100);
     assert_eq!(stats.cache_hit_tokens, 80);
+    assert_eq!(stats.average_call_elapsed_ms, 2_000);
+    assert_eq!(stats.average_turn_elapsed_ms, 4_000);
 }
 
 fn assert_local_time_text(value: &str) {

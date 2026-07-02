@@ -1,0 +1,256 @@
+/* ==========================================================================
+   Model picker popover
+   ========================================================================== */
+.model-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.model-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 178px;
+  max-width: 260px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--surface-muted);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.model-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.model-trigger:hover,
+.model-trigger[aria-expanded="true"] {
+  border-color: var(--accent-soft-border);
+  background: var(--surface);
+}
+
+.model-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 180;
+  width: 274px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  animation: pop-in 140ms var(--ease);
+}
+
+.model-popover-title {
+  margin: 0 2px 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 16px;
+}
+
+.model-list {
+  display: grid;
+  gap: 2px;
+}
+
+.model-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 6px 0 8px;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  transition: background var(--transition-fast);
+}
+
+.model-option span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.model-option small {
+  color: var(--text-muted);
+  text-align: right;
+  font-size: 12px;
+}
+
+.model-option svg {
+  justify-self: end;
+  color: var(--accent);
+}
+
+.model-option:hover {
+  background: var(--surface-hover);
+}
+
+.model-option.is-selected {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.model-popover-divider {
+  height: 1px;
+  margin: 9px -10px;
+  background: var(--border);
+}
+
+.model-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+}
+
+.model-setting-row span,
+.model-setting-heading span {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.model-setting-row small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.switch-button {
+  display: inline-flex;
+  align-items: center;
+  width: 36px;
+  height: 20px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background var(--transition), box-shadow var(--transition);
+}
+
+.switch-button span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(20, 33, 48, 0.24);
+  transition: transform var(--transition);
+}
+
+.switch-button.is-on {
+  background: var(--accent);
+}
+
+.switch-button.is-on span {
+  transform: translateX(16px);
+}
+
+.model-setting-block {
+  display: grid;
+  gap: 8px;
+  padding-top: 3px;
+}
+
+.model-setting-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.effort-segments {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.effort-segments button {
+  height: 28px;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.effort-segments button.is-selected {
+  color: var(--accent-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.effort-segments button:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
+}
+
+.send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 86px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+  background: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+  box-shadow: var(--shadow-xs);
+  transition: background var(--transition), box-shadow var(--transition),
+    transform var(--transition-fast);
+}
+
+.send-button:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow-sm);
+}
+
+.send-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.send-button:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  box-shadow: none;
+}
+
+@media (max-width: 1100px) {
+  .model-picker {
+    flex: 0 1 156px;
+  }
+
+  .model-trigger {
+    width: 100%;
+    min-width: 0;
+  }
+}

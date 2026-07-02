@@ -1,0 +1,218 @@
+/* ==========================================================================
+   Context menu & modals
+   ========================================================================== */
+.context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 158px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.context-menu-item.is-danger {
+  color: var(--danger-strong);
+}
+
+.context-menu-item.is-danger:hover,
+.context-menu-item.is-danger:focus-visible {
+  background: var(--danger-soft);
+}
+
+.session-search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 78px 24px 24px;
+  background: rgba(16, 24, 34, 0.24);
+  backdrop-filter: blur(2px);
+  animation: fade-in 140ms var(--ease);
+}
+
+.session-search-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(640px, 100%);
+  max-height: min(620px, calc(100vh - 116px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-xl);
+  animation: pop-in 160ms var(--ease);
+}
+
+.session-search-input-shell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.session-search-input-shell input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 15px;
+}
+
+.session-search-input-shell input::placeholder {
+  color: var(--text-muted);
+}
+
+.session-search-results {
+  min-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  scrollbar-color: rgba(102, 119, 137, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.session-search-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(84px, 148px);
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.session-search-item:hover,
+.session-search-item:focus-visible {
+  background: var(--surface-hover);
+  outline: none;
+}
+
+.session-search-item.is-selected {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.session-search-title,
+.session-search-workspace {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-search-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.session-search-workspace {
+  justify-self: end;
+  max-width: 148px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: right;
+}
+
+.session-search-empty {
+  display: grid;
+  place-items: center;
+  min-height: 172px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(16, 24, 34, 0.42);
+  backdrop-filter: blur(2px);
+  animation: fade-in 140ms var(--ease);
+}
+
+.workspace-required-modal {
+  width: min(420px, 100%);
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-xl);
+  animation: pop-in 160ms var(--ease);
+}
+
+.workspace-required-header {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.workspace-required-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.workspace-required-modal h2 {
+  margin: 0 0 5px;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 24px;
+  letter-spacing: -0.01em;
+}
+
+.workspace-required-modal p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.workspace-required-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}

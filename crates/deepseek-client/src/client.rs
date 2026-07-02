@@ -149,10 +149,12 @@ impl DeepSeekClient {
 impl ModelProvider for DeepSeekClient {
     fn stream_chat(&self, request: ChatRequest) -> SeekCodeResult<ChatStream> {
         let request = self.build_request(request, true)?;
+        let model = request.model.clone();
         let _ = self.api_key()?;
         let state = StreamState::Init {
             client: self.clone(),
             request: Some(request),
+            model,
         };
 
         Ok(Box::pin(stream::unfold(state, next_stream_item)))
@@ -160,11 +162,31 @@ impl ModelProvider for DeepSeekClient {
 
     async fn complete_chat(&self, request: ChatRequest) -> SeekCodeResult<ChatResponse> {
         let request = self.build_request(request, false)?;
+        let model = request.model.clone();
         let response = self.send_chat_request(request).await?;
-        let response: DeepSeekChatResponse = response
-            .json()
-            .await
-            .map_err(|error| SeekCodeError::ModelProvider(error.to_string()))?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(|error| {
+            tracing::error!(
+                target: "seekcode_deepseek_client::response",
+                model,
+                %status,
+                %error,
+                "failed to read non-streaming model response body"
+            );
+            SeekCodeError::ModelProvider(error.to_string())
+        })?;
+        let response: DeepSeekChatResponse = serde_json::from_slice(&bytes).map_err(|error| {
+            let body_preview = response_body_preview(&bytes);
+            tracing::error!(
+                target: "seekcode_deepseek_client::response",
+                model,
+                %status,
+                %error,
+                body_preview,
+                "failed to decode non-streaming model response body"
+            );
+            SeekCodeError::ModelProvider(format!("invalid response body: {error}"))
+        })?;
         let choice = response.choices.into_iter().next().ok_or_else(|| {
             SeekCodeError::ModelProvider("DeepSeek returned no choices".to_string())
         })?;
@@ -245,19 +267,27 @@ fn log_deepseek_request(
         let serialized = serde_json::to_string(message)
             .unwrap_or_else(|error| format!("serialize error: {error}"));
         tracing::debug!(
-            target: "seekcode_deepseek_client::request",
-            index,
-            role = %message.role,
-            content_present = message.content.is_some(),
-            content_len = message.content.as_deref().map(str::len).unwrap_or(0),
-            reasoning_present = message.reasoning_content.is_some(),
-            reasoning_len = message.reasoning_content.as_deref().map(str::len).unwrap_or(0),
-            tool_call_count = message.tool_calls.len(),
-            tool_call_id = ?message.tool_call_id,
-            message_json = %serialized,
-            "DeepSeek request message"
+                target: "seekcode_deepseek_client::request",
+                index,
+                role = %message.role,
+                content_present = message.content.is_some(),
+                content_len = message.content.as_deref().map(str::len).unwrap_or(0),
+                reasoning_present = message.reasoning_content.is_some(),
+                reasoning_len = message.reasoning_content.as_deref().map(str::len).unwrap_or(0),
+                tool_call_count = message.tool_calls.len(),
+                tool_call_id = ?message.tool_call_id,
+                message_json = %serialized,
+                "DeepSeek request message"
         );
     }
+}
+
+fn response_body_preview(bytes: &[u8]) -> String {
+    const MAX_PREVIEW_CHARS: usize = 2_000;
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .take(MAX_PREVIEW_CHARS)
+        .collect()
 }
 
 async fn ensure_success(response: reqwest::Response) -> SeekCodeResult<reqwest::Response> {
@@ -280,9 +310,13 @@ enum StreamState {
     Init {
         client: DeepSeekClient,
         request: Option<DeepSeekChatRequest>,
+        model: String,
     },
     Running {
+        model: String,
+        status: reqwest::StatusCode,
         bytes: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+        utf8_buffer: Vec<u8>,
         buffer: String,
         pending: VecDeque<ChatChunk>,
         done: bool,
@@ -298,22 +332,38 @@ async fn next_stream_item(
             StreamState::Init {
                 client,
                 mut request,
+                model,
             } => {
                 let request = request.take().expect("stream request is present");
                 match client.send_chat_request(request).await {
                     Ok(response) => {
+                        let status = response.status();
                         state = StreamState::Running {
+                            model,
+                            status,
                             bytes: response.bytes_stream().boxed(),
+                            utf8_buffer: Vec::new(),
                             buffer: String::new(),
                             pending: VecDeque::new(),
                             done: false,
                         };
                     }
-                    Err(error) => return Some((Err(error), StreamState::Done)),
+                    Err(error) => {
+                        tracing::error!(
+                            target: "seekcode_deepseek_client::response",
+                            model,
+                            %error,
+                            "failed to start streaming model response"
+                        );
+                        return Some((Err(error), StreamState::Done));
+                    }
                 }
             }
             StreamState::Running {
+                model,
+                status,
                 mut bytes,
+                mut utf8_buffer,
                 mut buffer,
                 mut pending,
                 mut done,
@@ -322,7 +372,10 @@ async fn next_stream_item(
                     return Some((
                         Ok(chunk),
                         StreamState::Running {
+                            model,
+                            status,
                             bytes,
+                            utf8_buffer,
                             buffer,
                             pending,
                             done,
@@ -336,8 +389,11 @@ async fn next_stream_item(
 
                 match bytes.next().await {
                     Some(Ok(next_bytes)) => {
-                        buffer
-                            .push_str(&String::from_utf8_lossy(&next_bytes).replace("\r\n", "\n"));
+                        if let Err(error) =
+                            push_stream_text(&mut buffer, &mut utf8_buffer, &next_bytes)
+                        {
+                            return Some((Err(error), StreamState::Done));
+                        }
 
                         while let Some(frame) = take_next_sse_frame(&mut buffer) {
                             match frame_data(&frame) {
@@ -348,6 +404,14 @@ async fn next_stream_item(
                                 Some(data) => match parse_sse_frame_choices(&data) {
                                     Ok(chunks) => pending.extend(chunks),
                                     Err(error) => {
+                                        tracing::error!(
+                                            target: "seekcode_deepseek_client::response",
+                                            model,
+                                            %status,
+                                            %error,
+                                            frame = %data.chars().take(2_000).collect::<String>(),
+                                            "failed to decode streaming model response frame"
+                                        );
                                         return Some((Err(error), StreamState::Done));
                                     }
                                 },
@@ -356,24 +420,80 @@ async fn next_stream_item(
                         }
 
                         state = StreamState::Running {
+                            model,
+                            status,
                             bytes,
+                            utf8_buffer,
                             buffer,
                             pending,
                             done,
                         };
                     }
                     Some(Err(error)) => {
+                        tracing::error!(
+                            target: "seekcode_deepseek_client::response",
+                            model,
+                            %status,
+                            %error,
+                            "failed to read streaming model response body"
+                        );
                         return Some((
                             Err(SeekCodeError::ModelProvider(error.to_string())),
                             StreamState::Done,
                         ));
                     }
-                    None => return None,
+                    None => {
+                        if utf8_buffer.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Err(SeekCodeError::ModelProvider(
+                                "DeepSeek stream ended with incomplete UTF-8 data".to_string(),
+                            )),
+                            StreamState::Done,
+                        ));
+                    }
                 }
             }
             StreamState::Done => return None,
         }
     }
+}
+
+fn push_stream_text(
+    buffer: &mut String,
+    utf8_buffer: &mut Vec<u8>,
+    next_bytes: &[u8],
+) -> SeekCodeResult<()> {
+    utf8_buffer.extend_from_slice(next_bytes);
+    match std::str::from_utf8(utf8_buffer) {
+        Ok(text) => {
+            push_normalized_stream_text(buffer, text);
+            utf8_buffer.clear();
+            Ok(())
+        }
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+            if valid_up_to > 0 {
+                let text =
+                    std::str::from_utf8(&utf8_buffer[..valid_up_to]).expect("valid UTF-8 prefix");
+                push_normalized_stream_text(buffer, text);
+                utf8_buffer.drain(..valid_up_to);
+            }
+
+            if error.error_len().is_some() {
+                Err(SeekCodeError::ModelProvider(
+                    "DeepSeek stream returned invalid UTF-8 data".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn push_normalized_stream_text(buffer: &mut String, text: &str) {
+    buffer.push_str(&text.replace("\r\n", "\n"));
 }
 
 fn take_next_sse_frame(buffer: &mut String) -> Option<String> {
@@ -437,5 +557,23 @@ mod tests {
 
         assert_eq!(encoded.role, "tool");
         assert_eq!(encoded.content.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn stream_text_keeps_multibyte_character_split_across_chunks() {
+        let text = "它系统提示词";
+        let split_at = 2;
+        let mut buffer = String::new();
+        let mut utf8_buffer = Vec::new();
+
+        push_stream_text(&mut buffer, &mut utf8_buffer, &text.as_bytes()[..split_at])
+            .expect("partial UTF-8 prefix is buffered");
+        assert_eq!(buffer, "");
+        assert_eq!(utf8_buffer, text.as_bytes()[..split_at]);
+
+        push_stream_text(&mut buffer, &mut utf8_buffer, &text.as_bytes()[split_at..])
+            .expect("remaining UTF-8 bytes complete the text");
+        assert_eq!(buffer, text);
+        assert!(utf8_buffer.is_empty());
     }
 }
