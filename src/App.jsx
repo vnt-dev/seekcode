@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { createPortal } from "react-dom";
 import { Virtuoso } from "react-virtuoso";
 import {
   Bot,
@@ -1828,7 +1829,7 @@ export function App() {
           </div>
         ) : null}
 
-        {contextMenu ? (
+        {contextMenu ? createPortal(
           <div
             className="context-menu"
             role="menu"
@@ -1868,7 +1869,8 @@ export function App() {
                 <span>{"删除会话"}</span>
               </button>
             )}
-          </div>
+          </div>,
+          document.body,
         ) : null}
 
         <div className="sidebar-footer">

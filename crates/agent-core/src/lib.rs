@@ -11,7 +11,7 @@ pub use agent::{Agent, AgentToolContext};
 pub use config::AgentConfig;
 pub use context::{
     AgentContext, AgentContextCompactionOutcome, AgentContextPrecheck, AgentContextPreparer,
-    AgentHistoryMessage, AgentTaskContext, PreparedAgentContext,
+    AgentHistoryMessage, AgentTaskContext, PreparedAgentContext, RunningContextCompaction,
 };
 pub use event::{tool_call_display, AgentEvent, ToolCallDisplay};
 pub use task::{AgentState, AgentTask, StartTaskRequest};

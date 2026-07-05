@@ -452,46 +452,6 @@ fn workspace_name_from_path(path: &str) -> String {
 }
 
 #[cfg(test)]
-fn normalize_generated_session_title(value: &str) -> String {
-    let mut title = value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .trim_start_matches(|ch: char| {
-            ch.is_ascii_digit()
-                || matches!(
-                    ch,
-                    '-' | '*' | '\u{2022}' | '.' | ')' | ']' | '\u{3001}' | ' ' | '\t'
-                )
-        })
-        .trim()
-        .trim_matches(|ch| {
-            matches!(
-                ch,
-                '"' | '\''
-                    | '`'
-                    | '\u{201c}'
-                    | '\u{201d}'
-                    | '\u{2018}'
-                    | '\u{2019}'
-                    | '\u{300c}'
-                    | '\u{300d}'
-                    | '\u{300a}'
-                    | '\u{300b}'
-            )
-        })
-        .trim()
-        .to_string();
-
-    if title.chars().count() > 48 {
-        title = title.chars().take(48).collect();
-    }
-
-    title
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::{build_skills_system_message_for_dir, SKILLS_SYSTEM_PREFIX};
@@ -512,9 +472,11 @@ mod tests {
     #[tokio::test]
     async fn app_kernel_updates_deepseek_config() {
         let kernel = AppKernel::new(AppKernelConfig::default()).expect("kernel builds");
-        let mut deepseek = DeepSeekConfig::default();
-        deepseek.base_url = "https://example.test".to_string();
-        deepseek.api_key = Some("sk-test".to_string());
+        let deepseek = DeepSeekConfig {
+            base_url: "https://example.test".to_string(),
+            api_key: Some("sk-test".to_string()),
+            ..Default::default()
+        };
 
         kernel
             .update_deepseek_config(deepseek)
@@ -839,13 +801,5 @@ mod tests {
         assert!(message.is_none());
 
         std::fs::remove_dir_all(root).expect("test dir cleans up");
-    }
-
-    #[test]
-    fn generated_session_title_is_normalized() {
-        assert_eq!(
-            normalize_generated_session_title("1. \u{201c}\u{4fee}\u{590d}\u{5de5}\u{5177}\u{8c03}\u{7528}\u{663e}\u{793a}\u{201d}\n\u{8bf4}\u{660e}"),
-            "\u{4fee}\u{590d}\u{5de5}\u{5177}\u{8c03}\u{7528}\u{663e}\u{793a}"
-        );
     }
 }

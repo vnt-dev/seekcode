@@ -49,9 +49,9 @@ pub(crate) fn spawn_session_agent_event_bridge(
                     }
                 }
                 Some(event)
-                    if agent_event_task_id(&event) == Some(task_id)
-                        && agent_event_session_id(&event) == Some(session_id)
-                        && is_terminal_agent_event(&event) =>
+                    if event.task_id() == task_id
+                        && event.session_id() == session_id
+                        && event.is_terminal() =>
                 {
                     match &event {
                         AgentEvent::Failed { error, .. } => {
@@ -96,10 +96,7 @@ pub(crate) fn spawn_session_agent_event_bridge(
                     }
                     break;
                 }
-                Some(event)
-                    if agent_event_task_id(&event) == Some(task_id)
-                        && agent_event_session_id(&event) == Some(session_id) =>
-                {
+                Some(event) if event.task_id() == task_id && event.session_id() == session_id => {
                     match &event {
                         AgentEvent::ModelRequestStarted {
                             round_id, model, ..
@@ -126,15 +123,16 @@ pub(crate) fn spawn_session_agent_event_bridge(
                                 .as_ref()
                                 .is_some_and(|call| call.round_id == *round_id)
                             {
-                                let call = active_model_call.take().expect("active call exists");
-                                sessions
-                                    .append_model_call_log(call.into_new_log(
-                                        model_provider.clone(),
-                                        session_id,
-                                        false,
-                                        None,
-                                    ))
-                                    .await;
+                                if let Some(call) = active_model_call.take() {
+                                    sessions
+                                        .append_model_call_log(call.into_new_log(
+                                            model_provider.clone(),
+                                            session_id,
+                                            false,
+                                            None,
+                                        ))
+                                        .await;
+                                }
                             }
                         }
                         AgentEvent::ModelRoundFinished {
@@ -166,15 +164,16 @@ pub(crate) fn spawn_session_agent_event_bridge(
                                 .as_ref()
                                 .is_some_and(|call| call.round_id == *round_id)
                             {
-                                let call = active_model_call.take().expect("active call exists");
-                                sessions
-                                    .append_model_call_log(call.into_new_log(
-                                        model_provider.clone(),
-                                        session_id,
-                                        true,
-                                        usage.clone(),
-                                    ))
-                                    .await;
+                                if let Some(call) = active_model_call.take() {
+                                    sessions
+                                        .append_model_call_log(call.into_new_log(
+                                            model_provider.clone(),
+                                            session_id,
+                                            true,
+                                            usage.clone(),
+                                        ))
+                                        .await;
+                                }
                             }
                         }
                         AgentEvent::ToolCallFinished { .. } => {
@@ -238,49 +237,4 @@ impl PendingModelCallLog {
             called_at: self.called_at,
         }
     }
-}
-
-fn agent_event_task_id(event: &AgentEvent) -> Option<TaskId> {
-    match event {
-        AgentEvent::TaskStarted { task_id, .. }
-        | AgentEvent::StateChanged { task_id, .. }
-        | AgentEvent::ModelRequestStarted { task_id, .. }
-        | AgentEvent::ModelRequestRetrying { task_id, .. }
-        | AgentEvent::AssistantMessageDelta { task_id, .. }
-        | AgentEvent::ToolCallStarted { task_id, .. }
-        | AgentEvent::ToolCallFinished { task_id, .. }
-        | AgentEvent::ModelRoundFinished { task_id, .. }
-        | AgentEvent::Finished { task_id, .. }
-        | AgentEvent::Failed { task_id, .. }
-        | AgentEvent::Canceled { task_id, .. }
-        | AgentEvent::ContextCompactionStarted { task_id, .. }
-        | AgentEvent::ContextCompactionCanceled { task_id, .. }
-        | AgentEvent::ContextCompactionFinished { task_id, .. } => Some(*task_id),
-    }
-}
-
-fn agent_event_session_id(event: &AgentEvent) -> Option<SessionId> {
-    match event {
-        AgentEvent::TaskStarted { session_id, .. }
-        | AgentEvent::StateChanged { session_id, .. }
-        | AgentEvent::ModelRequestStarted { session_id, .. }
-        | AgentEvent::ModelRequestRetrying { session_id, .. }
-        | AgentEvent::AssistantMessageDelta { session_id, .. }
-        | AgentEvent::ToolCallStarted { session_id, .. }
-        | AgentEvent::ToolCallFinished { session_id, .. }
-        | AgentEvent::ModelRoundFinished { session_id, .. }
-        | AgentEvent::Finished { session_id, .. }
-        | AgentEvent::Failed { session_id, .. }
-        | AgentEvent::Canceled { session_id, .. }
-        | AgentEvent::ContextCompactionStarted { session_id, .. }
-        | AgentEvent::ContextCompactionCanceled { session_id, .. }
-        | AgentEvent::ContextCompactionFinished { session_id, .. } => Some(*session_id),
-    }
-}
-
-fn is_terminal_agent_event(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::Finished { .. } | AgentEvent::Failed { .. } | AgentEvent::Canceled { .. }
-    )
 }

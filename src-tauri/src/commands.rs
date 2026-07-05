@@ -2,7 +2,7 @@
 
 use crate::config::{self, provider_connection, AppSettings, ModelSetting};
 use crate::state::AppState;
-use seekcode_agent_core::{AgentEvent, AgentTask, StartTaskRequest};
+use seekcode_agent_core::{AgentTask, StartTaskRequest};
 use seekcode_app_kernel::{
     CreateSessionRequest, OpenWorkspaceRequest, WorkspaceWithSessions, DEFAULT_CONTEXT_WINDOW,
 };
@@ -109,11 +109,8 @@ pub async fn start_agent_task(
     tauri::async_runtime::spawn(async move {
         loop {
             match events.recv().await {
-                Some(event)
-                    if agent_event_task_id(&event) == Some(task_id)
-                        && agent_event_session_id(&event) == Some(session_id) =>
-                {
-                    let terminal = is_terminal_agent_event(&event);
+                Some(event) if event.task_id() == task_id && event.session_id() == session_id => {
+                    let terminal = event.is_terminal();
                     if let Err(error) = agent_app.emit("agent:event", event) {
                         tracing::warn!(
                             target: "seekcode_tauri::commands",
@@ -421,52 +418,6 @@ pub async fn fetch_provider_models(
 
     Ok(models)
 }
-
-fn agent_event_task_id(event: &AgentEvent) -> Option<TaskId> {
-    match event {
-        AgentEvent::TaskStarted { task_id, .. }
-        | AgentEvent::StateChanged { task_id, .. }
-        | AgentEvent::ModelRequestStarted { task_id, .. }
-        | AgentEvent::ModelRequestRetrying { task_id, .. }
-        | AgentEvent::AssistantMessageDelta { task_id, .. }
-        | AgentEvent::ToolCallStarted { task_id, .. }
-        | AgentEvent::ToolCallFinished { task_id, .. }
-        | AgentEvent::ModelRoundFinished { task_id, .. }
-        | AgentEvent::Finished { task_id, .. }
-        | AgentEvent::Failed { task_id, .. }
-        | AgentEvent::Canceled { task_id, .. }
-        | AgentEvent::ContextCompactionStarted { task_id, .. }
-        | AgentEvent::ContextCompactionCanceled { task_id, .. }
-        | AgentEvent::ContextCompactionFinished { task_id, .. } => Some(*task_id),
-    }
-}
-
-fn agent_event_session_id(event: &AgentEvent) -> Option<SessionId> {
-    match event {
-        AgentEvent::TaskStarted { session_id, .. }
-        | AgentEvent::StateChanged { session_id, .. }
-        | AgentEvent::ModelRequestStarted { session_id, .. }
-        | AgentEvent::ModelRequestRetrying { session_id, .. }
-        | AgentEvent::AssistantMessageDelta { session_id, .. }
-        | AgentEvent::ToolCallStarted { session_id, .. }
-        | AgentEvent::ToolCallFinished { session_id, .. }
-        | AgentEvent::ModelRoundFinished { session_id, .. }
-        | AgentEvent::Finished { session_id, .. }
-        | AgentEvent::Failed { session_id, .. }
-        | AgentEvent::Canceled { session_id, .. }
-        | AgentEvent::ContextCompactionStarted { session_id, .. }
-        | AgentEvent::ContextCompactionCanceled { session_id, .. }
-        | AgentEvent::ContextCompactionFinished { session_id, .. } => Some(*session_id),
-    }
-}
-
-fn is_terminal_agent_event(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::Finished { .. } | AgentEvent::Failed { .. } | AgentEvent::Canceled { .. }
-    )
-}
-
 fn normalize_reasoning_effort(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_lowercase();
     matches!(value.as_str(), "high" | "max").then_some(value)

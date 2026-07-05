@@ -173,6 +173,56 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    /// Returns the task identifier attached to this agent event.
+    pub fn task_id(&self) -> TaskId {
+        match self {
+            AgentEvent::TaskStarted { task_id, .. }
+            | AgentEvent::StateChanged { task_id, .. }
+            | AgentEvent::ModelRequestStarted { task_id, .. }
+            | AgentEvent::ModelRequestRetrying { task_id, .. }
+            | AgentEvent::AssistantMessageDelta { task_id, .. }
+            | AgentEvent::ToolCallStarted { task_id, .. }
+            | AgentEvent::ToolCallFinished { task_id, .. }
+            | AgentEvent::ModelRoundFinished { task_id, .. }
+            | AgentEvent::Finished { task_id, .. }
+            | AgentEvent::Failed { task_id, .. }
+            | AgentEvent::Canceled { task_id, .. }
+            | AgentEvent::ContextCompactionStarted { task_id, .. }
+            | AgentEvent::ContextCompactionCanceled { task_id, .. }
+            | AgentEvent::ContextCompactionFinished { task_id, .. } => *task_id,
+        }
+    }
+
+    /// Returns the session identifier attached to this agent event.
+    pub fn session_id(&self) -> SessionId {
+        match self {
+            AgentEvent::TaskStarted { session_id, .. }
+            | AgentEvent::StateChanged { session_id, .. }
+            | AgentEvent::ModelRequestStarted { session_id, .. }
+            | AgentEvent::ModelRequestRetrying { session_id, .. }
+            | AgentEvent::AssistantMessageDelta { session_id, .. }
+            | AgentEvent::ToolCallStarted { session_id, .. }
+            | AgentEvent::ToolCallFinished { session_id, .. }
+            | AgentEvent::ModelRoundFinished { session_id, .. }
+            | AgentEvent::Finished { session_id, .. }
+            | AgentEvent::Failed { session_id, .. }
+            | AgentEvent::Canceled { session_id, .. }
+            | AgentEvent::ContextCompactionStarted { session_id, .. }
+            | AgentEvent::ContextCompactionCanceled { session_id, .. }
+            | AgentEvent::ContextCompactionFinished { session_id, .. } => *session_id,
+        }
+    }
+
+    /// Returns whether this event ends the task stream.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            AgentEvent::Finished { .. } | AgentEvent::Failed { .. } | AgentEvent::Canceled { .. }
+        )
+    }
+}
+
 /// UI-ready summary for a tool call.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallDisplay {

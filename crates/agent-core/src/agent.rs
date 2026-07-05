@@ -13,7 +13,7 @@ use tokio::task::AbortHandle;
 use crate::config::AgentConfig;
 use crate::context::{AgentContext, AgentContextPreparer, AgentTaskContext};
 use crate::event::{publish, publish_state, AgentEvent};
-use crate::runner::AgentTaskRunner;
+use crate::runner::{AgentRunRequest, AgentTaskRunner};
 use crate::task::{AgentState, AgentTask, StartTaskRequest};
 
 /// Provider-backed agent runtime.
@@ -199,7 +199,7 @@ impl Agent {
         let handle = tokio::spawn(async move {
             let _completion_guard = completion_guard;
             runner
-                .run(
+                .run(AgentRunRequest {
                     task_id,
                     session_id,
                     model,
@@ -207,7 +207,7 @@ impl Agent {
                     reasoning_effort,
                     prompt,
                     context,
-                )
+                })
                 .await;
         });
         self.task_controls.write().insert(

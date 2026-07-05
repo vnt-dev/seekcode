@@ -30,7 +30,7 @@ pub struct AppSettings {
 pub const DEFAULT_CONTEXT_WINDOW_TEXT: &str = "1M";
 
 /// User-editable model provider entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelProviderSetting {
     /// Stable provider identifier persisted on sessions.
@@ -46,34 +46,13 @@ pub struct ModelProviderSetting {
 }
 
 /// User-editable model entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelSetting {
     /// Model identifier sent to the provider.
     pub id: String,
     /// Human-readable model label shown in the UI.
     pub label: String,
-}
-
-impl Default for ModelProviderSetting {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            base_url: String::new(),
-            api_key: String::new(),
-            models: Vec::new(),
-        }
-    }
-}
-
-impl Default for ModelSetting {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            label: String::new(),
-        }
-    }
 }
 
 impl Default for AppSettings {

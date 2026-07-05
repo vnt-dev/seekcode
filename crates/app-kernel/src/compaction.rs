@@ -101,25 +101,38 @@ fn build_history_transcript(
         if !selected.contains(&history.turn_sequence) {
             continue;
         }
-        let message = &history.message;
-        let role = match message.role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "assistant",
-            ChatRole::Tool => "tool",
-        };
-        let content = message.content.trim();
-        if !content.is_empty() {
-            transcript.push_str(&format!("[{role}] {content}\n"));
-        }
-        if !message.tool_calls.is_empty() {
-            transcript.push_str(&format!(
-                "[{role}] (requested {} tool call(s))\n",
-                message.tool_calls.len()
-            ));
-        }
+        push_message_transcript_line(&mut transcript, &history.message);
     }
 
+    transcript
+}
+
+/// Appends one message's readable transcript lines (content and tool-call note).
+fn push_message_transcript_line(transcript: &mut String, message: &ChatMessage) {
+    let role = match message.role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    };
+    let content = message.content.trim();
+    if !content.is_empty() {
+        transcript.push_str(&format!("[{role}] {content}\n"));
+    }
+    if !message.tool_calls.is_empty() {
+        transcript.push_str(&format!(
+            "[{role}] (requested {} tool call(s))\n",
+            message.tool_calls.len()
+        ));
+    }
+}
+
+/// Builds a readable transcript from a flat running-loop message list.
+fn build_running_transcript(messages: &[ChatMessage]) -> String {
+    let mut transcript = String::new();
+    for message in messages {
+        push_message_transcript_line(&mut transcript, message);
+    }
     transcript
 }
 
@@ -142,6 +155,42 @@ pub(crate) async fn compact_session_context(
     context: &AgentTaskContext,
 ) -> SeekCodeResult<Option<CompactionOutcome>> {
     compact_session_context_inner(sessions, provider, session_id, model, context).await
+}
+
+/// Summarizes a flat running-loop message list and persists it to the session.
+///
+/// Returns the trimmed summary text and the number of folded assistant rounds,
+/// or `None` when the model produced an empty summary.
+pub(crate) async fn compact_running_context(
+    sessions: Arc<SessionService>,
+    provider: Arc<dyn ModelProvider>,
+    session_id: SessionId,
+    model: String,
+    messages_to_compact: &[ChatMessage],
+    compacted_through_turn: i64,
+) -> SeekCodeResult<Option<(String, usize)>> {
+    let transcript = build_running_transcript(messages_to_compact);
+    if transcript.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let summary = summarize_history(&sessions, provider, session_id, model, transcript).await?;
+    let summary = summary.trim().to_string();
+    if summary.is_empty() {
+        return Ok(None);
+    }
+
+    // Approximate folded rounds by the number of assistant messages compacted.
+    let folded_rounds = messages_to_compact
+        .iter()
+        .filter(|message| message.role == ChatRole::Assistant)
+        .count();
+
+    sessions
+        .save_compaction(session_id, summary.clone(), compacted_through_turn)
+        .await?;
+
+    Ok(Some((summary, folded_rounds)))
 }
 
 async fn compact_session_context_inner(
@@ -399,6 +448,25 @@ mod tests {
         let plan = plan_compaction(&[4, 5, 6], KEEP_RECENT_ROUNDS).expect("a plan is produced");
         assert_eq!(plan.compacted_through_turn, 4);
         assert_eq!(plan.turns_to_compress, vec![4]);
+    }
+
+    #[test]
+    fn running_transcript_includes_all_roles_and_tool_call_note() {
+        let mut assistant = ChatMessage::new(ChatRole::Assistant, "assistant reply");
+        assistant.tool_calls = vec![serde_json::json!({"id": "call_1"})];
+        let messages = vec![
+            ChatMessage::new(ChatRole::System, "system rule"),
+            ChatMessage::new(ChatRole::User, "user ask"),
+            assistant,
+            ChatMessage::new(ChatRole::Tool, "tool output"),
+        ];
+
+        let transcript = build_running_transcript(&messages);
+        assert!(transcript.contains("[system] system rule"));
+        assert!(transcript.contains("[user] user ask"));
+        assert!(transcript.contains("[assistant] assistant reply"));
+        assert!(transcript.contains("[assistant] (requested 1 tool call(s))"));
+        assert!(transcript.contains("[tool] tool output"));
     }
 
     #[test]

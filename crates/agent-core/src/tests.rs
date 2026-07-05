@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream;
 use seekcode_common::{
-    ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, TokenUsage, WorkspaceId,
+    ChatMessage, ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, TokenUsage,
+    WorkspaceId,
 };
 use seekcode_deepseek_client::{
     ChatChunk, ChatRequest, ChatResponse, ChatStream, ModelProfile, ModelProvider,
@@ -15,8 +16,9 @@ use tokio::sync::mpsc;
 
 use crate::runner::{append_tool_results_to_context, ToolCallRunResult};
 use crate::{
-    Agent, AgentConfig, AgentEvent, AgentState, AgentTask, AgentTaskContext, AgentToolContext,
-    StartTaskRequest,
+    Agent, AgentConfig, AgentContextCompactionOutcome, AgentContextPrecheck, AgentContextPreparer,
+    AgentEvent, AgentHistoryMessage, AgentState, AgentTask, AgentTaskContext, AgentToolContext,
+    PreparedAgentContext, RunningContextCompaction, StartTaskRequest,
 };
 
 #[derive(Default)]
@@ -779,6 +781,178 @@ async fn start_task_returns_failed_tool_result_to_model() {
     assert!(saw_failed_tool_event);
     assert!(saw_second_round);
     assert!(saw_final_delta);
+}
+
+/// Context preparer that records in-loop compaction calls and returns a summary.
+struct RecordingRunningPreparer {
+    compact_calls: Arc<std::sync::Mutex<usize>>,
+}
+
+#[async_trait]
+impl AgentContextPreparer for RecordingRunningPreparer {
+    async fn prepare_context(
+        &self,
+        _task_id: TaskId,
+        _session_id: SessionId,
+        _model: &str,
+        _prompt: &str,
+        current_context: &AgentTaskContext,
+        _precheck: AgentContextPrecheck,
+    ) -> SeekCodeResult<PreparedAgentContext> {
+        Ok(PreparedAgentContext {
+            context: current_context.clone(),
+            compaction: None,
+        })
+    }
+
+    async fn compact_running_context(
+        &self,
+        _task_id: TaskId,
+        _session_id: SessionId,
+        _model: &str,
+        _messages_to_compact: &[ChatMessage],
+        compacted_through_turn: i64,
+    ) -> SeekCodeResult<Option<RunningContextCompaction>> {
+        *self.compact_calls.lock().expect("compact calls lock") += 1;
+        Ok(Some(RunningContextCompaction {
+            summary_message: ChatMessage::new(ChatRole::System, "SUMMARY"),
+            outcome: AgentContextCompactionOutcome {
+                compacted_rounds: 1,
+                compacted_through_turn,
+                summary_chars: "SUMMARY".chars().count(),
+            },
+        }))
+    }
+}
+
+/// Builds one streamed round that requests a missing tool and reports usage.
+fn tool_round_with_usage(prompt_tokens: u32) -> Vec<ChatChunk> {
+    vec![
+        ChatChunk::Choice(seekcode_deepseek_client::ChatChoiceChunk {
+            delta: seekcode_deepseek_client::ChatDelta {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![seekcode_deepseek_client::ToolCallDelta {
+                    index: 0,
+                    id: Some("call_x".to_string()),
+                    kind: Some("function".to_string()),
+                    name: Some("missing_tool".to_string()),
+                    arguments: Some("{}".to_string()),
+                }],
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        }),
+        ChatChunk::Usage(TokenUsage {
+            prompt_tokens,
+            completion_tokens: 1,
+            total_tokens: prompt_tokens + 1,
+            cached_tokens: 0,
+        }),
+        ChatChunk::Finished,
+    ]
+}
+
+#[tokio::test]
+async fn in_loop_compaction_folds_context_once_past_threshold() {
+    // context_window is 1_000, so the 95% in-loop threshold is 950 tokens.
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut rounds = std::collections::VecDeque::new();
+    // Rounds 1 and 2 both exceed the threshold and request another round.
+    rounds.push_back(tool_round_with_usage(960));
+    rounds.push_back(tool_round_with_usage(960));
+    // Round 3 stops requesting tools, ending the task.
+    rounds.push_back(vec![
+        ChatChunk::Content("done".to_string()),
+        ChatChunk::Finished,
+    ]);
+
+    let agent = Agent::new(
+        AgentConfig::default(),
+        Arc::new(RecordingRoundProvider {
+            rounds: std::sync::Mutex::new(rounds),
+            requests: Arc::clone(&requests),
+        }),
+        Arc::new(ToolRegistry::new()),
+    );
+    let compact_calls = Arc::new(std::sync::Mutex::new(0usize));
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+
+    // Seed expanded history so the compactable portion is non-empty.
+    let mut context = task_context("Keep calling tools");
+    context.history_messages = vec![
+        AgentHistoryMessage {
+            turn_sequence: 1,
+            message: ChatMessage::new(ChatRole::User, "old-user"),
+        },
+        AgentHistoryMessage {
+            turn_sequence: 1,
+            message: ChatMessage::new(ChatRole::Assistant, "old-assistant"),
+        },
+    ];
+
+    let task = agent
+        .start_task_with_messages_tools_and_context_preparer(
+            StartTaskRequest {
+                session_id: SessionId::new(),
+                prompt: "Keep calling tools".to_string(),
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+            },
+            context,
+            Arc::new(ToolRegistry::new()),
+            event_sender,
+            Some(Arc::new(RecordingRunningPreparer {
+                compact_calls: Arc::clone(&compact_calls),
+            })),
+        )
+        .await
+        .expect("task starts");
+
+    let mut saw_compaction_started = false;
+    let mut saw_compaction_finished = false;
+    for _ in 0..40 {
+        let event = events.recv().await.expect("event is published");
+        match event {
+            AgentEvent::ContextCompactionStarted { task_id, .. } if task_id == task.id => {
+                saw_compaction_started = true;
+            }
+            AgentEvent::ContextCompactionFinished { task_id, .. } if task_id == task.id => {
+                saw_compaction_finished = true;
+            }
+            AgentEvent::Failed { task_id, error, .. } if task_id == task.id => {
+                panic!("task should complete, not fail: {error}");
+            }
+            AgentEvent::Finished { task_id, .. } if task_id == task.id => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_compaction_started);
+    assert!(saw_compaction_finished);
+    // Compaction is attempted exactly once even though rounds 1 and 2 both crossed
+    // the threshold.
+    assert_eq!(*compact_calls.lock().expect("compact calls lock"), 1);
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 3);
+
+    let has_content = |request: &ChatRequest, content: &str| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.content == content)
+    };
+    // Round 1 (before the fold) still carries the expanded history.
+    assert!(has_content(&requests[0], "old-assistant"));
+    assert!(!has_content(&requests[0], "SUMMARY"));
+    // Round 2 (after the fold) replaces the history with the summary but keeps the
+    // latest user message and round 1's appended turn.
+    assert!(has_content(&requests[1], "SUMMARY"));
+    assert!(!has_content(&requests[1], "old-assistant"));
+    assert!(has_content(&requests[1], "Keep calling tools"));
+    // Round 3 was not folded again: the summary persists, no second compaction.
+    assert!(has_content(&requests[2], "SUMMARY"));
 }
 
 #[test]

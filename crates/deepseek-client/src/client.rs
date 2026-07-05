@@ -123,7 +123,10 @@ impl DeepSeekClient {
                     "disabled".to_string()
                 },
             },
-            reasoning_effort: request.thinking.then(|| request.reasoning_effort).flatten(),
+            reasoning_effort: request
+                .thinking
+                .then_some(request.reasoning_effort)
+                .flatten(),
         })
     }
 
@@ -153,7 +156,7 @@ impl ModelProvider for DeepSeekClient {
         let _ = self.api_key()?;
         let state = StreamState::Init {
             client: self.clone(),
-            request: Some(request),
+            request,
             model,
         };
 
@@ -309,7 +312,7 @@ async fn ensure_success(response: reqwest::Response) -> SeekCodeResult<reqwest::
 enum StreamState {
     Init {
         client: DeepSeekClient,
-        request: Option<DeepSeekChatRequest>,
+        request: DeepSeekChatRequest,
         model: String,
     },
     Running {
@@ -331,34 +334,31 @@ async fn next_stream_item(
         match state {
             StreamState::Init {
                 client,
-                mut request,
+                request,
                 model,
-            } => {
-                let request = request.take().expect("stream request is present");
-                match client.send_chat_request(request).await {
-                    Ok(response) => {
-                        let status = response.status();
-                        state = StreamState::Running {
-                            model,
-                            status,
-                            bytes: response.bytes_stream().boxed(),
-                            utf8_buffer: Vec::new(),
-                            buffer: String::new(),
-                            pending: VecDeque::new(),
-                            done: false,
-                        };
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            target: "seekcode_deepseek_client::response",
-                            model,
-                            %error,
-                            "failed to start streaming model response"
-                        );
-                        return Some((Err(error), StreamState::Done));
-                    }
+            } => match client.send_chat_request(request).await {
+                Ok(response) => {
+                    let status = response.status();
+                    state = StreamState::Running {
+                        model,
+                        status,
+                        bytes: response.bytes_stream().boxed(),
+                        utf8_buffer: Vec::new(),
+                        buffer: String::new(),
+                        pending: VecDeque::new(),
+                        done: false,
+                    };
                 }
-            }
+                Err(error) => {
+                    tracing::error!(
+                        target: "seekcode_deepseek_client::response",
+                        model,
+                        %error,
+                        "failed to start streaming model response"
+                    );
+                    return Some((Err(error), StreamState::Done));
+                }
+            },
             StreamState::Running {
                 model,
                 status,
@@ -475,8 +475,11 @@ fn push_stream_text(
         Err(error) => {
             let valid_up_to = error.valid_up_to();
             if valid_up_to > 0 {
-                let text =
-                    std::str::from_utf8(&utf8_buffer[..valid_up_to]).expect("valid UTF-8 prefix");
+                let text = std::str::from_utf8(&utf8_buffer[..valid_up_to]).map_err(|error| {
+                    SeekCodeError::ModelProvider(format!(
+                        "DeepSeek stream returned invalid UTF-8 prefix: {error}"
+                    ))
+                })?;
                 push_normalized_stream_text(buffer, text);
                 utf8_buffer.drain(..valid_up_to);
             }

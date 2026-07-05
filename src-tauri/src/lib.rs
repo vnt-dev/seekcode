@@ -10,8 +10,15 @@ use tracing_subscriber::EnvFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _log_guard = init_file_logging().expect("failed to initialize file logging");
-    let app_state = state::AppState::new().expect("failed to initialize app kernel");
+    if let Err(error) = try_run() {
+        eprintln!("failed to run SeekCode: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+fn try_run() -> Result<()> {
+    let _log_guard = init_file_logging()?;
+    let app_state = state::AppState::new().context("failed to initialize app kernel")?;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -36,7 +43,9 @@ pub fn run() {
             commands::save_app_settings
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .context("error while running tauri application")?;
+
+    Ok(())
 }
 
 fn init_file_logging() -> Result<WorkerGuard> {

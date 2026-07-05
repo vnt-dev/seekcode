@@ -3,7 +3,8 @@
 //! session-scoped title/compaction bookkeeping.
 
 use crate::compaction::{
-    compact_session_context, compacted_history_message, precheck_session_context_compaction,
+    compact_running_context, compact_session_context, compacted_history_message,
+    precheck_session_context_compaction,
 };
 use crate::context::{
     build_agents_instructions_message, build_environment_context, build_skills_system_message,
@@ -14,7 +15,7 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use seekcode_agent_core::{
     AgentContextCompactionOutcome, AgentContextPrecheck, AgentContextPreparer, AgentHistoryMessage,
-    AgentTaskContext, AgentToolContext, PreparedAgentContext,
+    AgentTaskContext, AgentToolContext, PreparedAgentContext, RunningContextCompaction,
 };
 use seekcode_common::{
     ChatMessage, ChatRole, SeekCodeError, SeekCodeResult, SessionId, TaskId, WorkspaceId,
@@ -541,6 +542,53 @@ impl AgentContextPreparer for SessionTaskContextPreparer {
             context,
             compaction,
         })
+    }
+
+    async fn compact_running_context(
+        &self,
+        task_id: TaskId,
+        session_id: SessionId,
+        model: &str,
+        messages_to_compact: &[ChatMessage],
+        compacted_through_turn: i64,
+    ) -> SeekCodeResult<Option<RunningContextCompaction>> {
+        let compacted = match compact_running_context(
+            self.sessions.clone(),
+            self.provider.clone(),
+            session_id,
+            model.to_string(),
+            messages_to_compact,
+            compacted_through_turn,
+        )
+        .await
+        {
+            Ok(compacted) => compacted,
+            Err(error) => {
+                // Surface the failure but let the run continue without folding.
+                tracing::warn!(
+                    target: "seekcode_app_kernel::context_compaction",
+                    %session_id,
+                    %task_id,
+                    %error,
+                    "running context compaction failed; continuing without folding"
+                );
+                return Ok(None);
+            }
+        };
+
+        let Some((summary, compacted_rounds)) = compacted else {
+            return Ok(None);
+        };
+
+        let summary_chars = summary.chars().count();
+        Ok(Some(RunningContextCompaction {
+            summary_message: compacted_history_message(&summary),
+            outcome: AgentContextCompactionOutcome {
+                compacted_rounds,
+                compacted_through_turn,
+                summary_chars,
+            },
+        }))
     }
 }
 

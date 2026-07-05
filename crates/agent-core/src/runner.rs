@@ -12,11 +12,14 @@ use tokio::sync::mpsc;
 
 use crate::agent::AgentToolContext;
 use crate::config::AgentConfig;
-use crate::context::{AgentContext, AgentContextPreparer};
+use crate::context::{AgentContext, AgentContextPreparer, AgentTaskContext};
 use crate::event::{publish, publish_state, tool_call_display, tool_finished_event, AgentEvent};
 use crate::task::{set_task_state, task_state, AgentState, AgentTask};
 
 const MAX_MODEL_REQUEST_RETRIES: u32 = 5;
+
+/// Percentage of the context window at which the in-loop compaction triggers.
+const IN_LOOP_COMPACTION_TRIGGER_PERCENT: i64 = 95;
 
 /// Owns the state required to run a single agent task to completion.
 pub(crate) struct AgentTaskRunner {
@@ -27,6 +30,17 @@ pub(crate) struct AgentTaskRunner {
     pub(crate) events: mpsc::UnboundedSender<AgentEvent>,
     pub(crate) context_preparer: Option<Arc<dyn AgentContextPreparer>>,
     pub(crate) tool_context: AgentToolContext,
+}
+
+/// Input required to run one accepted agent task.
+pub(crate) struct AgentRunRequest {
+    pub(crate) task_id: TaskId,
+    pub(crate) session_id: SessionId,
+    pub(crate) model: String,
+    pub(crate) thinking: bool,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) prompt: String,
+    pub(crate) context: AgentContext,
 }
 
 /// Result of executing one tool call, kept to append back into the context.
@@ -40,6 +54,8 @@ struct ModelRoundAttemptResult {
     round_content: String,
     round_reasoning: String,
     tool_results: Vec<ToolCallRunResult>,
+    /// Input token count reported by the provider for this attempt, if any.
+    input_tokens: Option<i64>,
 }
 
 /// Distinguishes retryable provider failures from fatal local runner failures.
@@ -56,27 +72,10 @@ enum ModelRoundAttemptOutcome {
 
 impl AgentTaskRunner {
     /// Runs the task loop and reports failure as a terminal event.
-    pub(crate) async fn run(
-        self,
-        task_id: TaskId,
-        session_id: SessionId,
-        model: String,
-        thinking: bool,
-        reasoning_effort: Option<String>,
-        prompt: String,
-        context: AgentContext,
-    ) {
-        let result = self
-            .run_inner(
-                task_id,
-                session_id,
-                model,
-                thinking,
-                reasoning_effort,
-                prompt,
-                context,
-            )
-            .await;
+    pub(crate) async fn run(self, request: AgentRunRequest) {
+        let task_id = request.task_id;
+        let session_id = request.session_id;
+        let result = self.run_inner(request).await;
         if let Err(error) = result {
             tracing::error!(
                 target: "seekcode_agent_core::runner",
@@ -99,16 +98,16 @@ impl AgentTaskRunner {
     }
 
     /// Streams model rounds, executing tools until the model stops requesting them.
-    async fn run_inner(
-        &self,
-        task_id: TaskId,
-        session_id: SessionId,
-        model: String,
-        thinking: bool,
-        reasoning_effort: Option<String>,
-        prompt: String,
-        context: AgentContext,
-    ) -> SeekCodeResult<()> {
+    async fn run_inner(&self, request: AgentRunRequest) -> SeekCodeResult<()> {
+        let AgentRunRequest {
+            task_id,
+            session_id,
+            model,
+            thinking,
+            reasoning_effort,
+            prompt,
+            context,
+        } = request;
         let tool_specs = self.tools.tool_specs(self.config.strict_tools);
         let mut task_context = context.task_context.clone();
         if let Some(preparer) = &self.context_preparer {
@@ -159,8 +158,33 @@ impl AgentTaskRunner {
             }
         }
 
-        let mut messages = task_context.messages();
+        // Messages appended during the loop (assistant turns and tool results);
+        // the immutable per-round base comes from `task_context.messages()`.
+        let mut appended_messages: Vec<ChatMessage> = Vec::new();
+
+        let in_loop_compaction_threshold = i64::from(
+            self.provider.model_profile(&model).await?.context_window,
+        ) * IN_LOOP_COMPACTION_TRIGGER_PERCENT
+            / 100;
+        let mut in_loop_compacted = false;
+        let mut latest_input_tokens: Option<i64> = None;
+
         for round_id in 1..=64 {
+            // Fold the compacted-context + history portion once when the live input
+            // token count crosses the trigger; skipped on round 1 (no usage yet).
+            if !in_loop_compacted
+                && latest_input_tokens.is_some_and(|tokens| tokens >= in_loop_compaction_threshold)
+            {
+                self.compact_running_context(task_id, session_id, &model, &mut task_context)
+                    .await?;
+                in_loop_compacted = true;
+            }
+
+            // Rebuild the request context from the (possibly compacted) base plus
+            // the messages accumulated so far this run.
+            let mut messages = task_context.messages();
+            messages.extend(appended_messages.iter().cloned());
+
             let mut retry_count = 0;
             let attempt_result = loop {
                 let chat_request = ChatRequest {
@@ -237,7 +261,14 @@ impl AgentTaskRunner {
                 round_content,
                 round_reasoning,
                 tool_results,
+                input_tokens,
             } = attempt_result;
+
+            // Track the most recent reported input tokens for the next round's
+            // compaction check; keep the prior value if this round had no usage.
+            if let Some(input_tokens) = input_tokens {
+                latest_input_tokens = Some(input_tokens);
+            }
 
             if task_state(&self.tasks, task_id).await? == AgentState::Canceled {
                 return Ok(());
@@ -262,11 +293,11 @@ impl AgentTaskRunner {
                 %task_id,
                 round_id,
                 tool_result_count = tool_results.len(),
-                message_count_before_append = messages.len(),
+                request_message_count = messages.len(),
                 "appending tool results before next streaming model request"
             );
             append_tool_results_to_context(
-                &mut messages,
+                &mut appended_messages,
                 round_content,
                 round_reasoning,
                 tool_results,
@@ -277,7 +308,7 @@ impl AgentTaskRunner {
                 %task_id,
                 current_round_id = round_id,
                 next_round_id = round_id + 1,
-                message_count_after_append = messages.len(),
+                appended_message_count = appended_messages.len(),
                 "tool results appended; next round will send updated context"
             );
         }
@@ -285,6 +316,73 @@ impl AgentTaskRunner {
         Err(SeekCodeError::ModelProvider(
             "model requested too many tool rounds".to_string(),
         ))
+    }
+
+    /// Folds the compacted-context and history portion into a single summary.
+    ///
+    /// Publishes the compaction lifecycle events and, on success, replaces the
+    /// compacted context and clears the expanded history in `task_context`.
+    async fn compact_running_context(
+        &self,
+        task_id: TaskId,
+        session_id: SessionId,
+        model: &str,
+        task_context: &mut AgentTaskContext,
+    ) -> SeekCodeResult<()> {
+        let Some(preparer) = &self.context_preparer else {
+            return Ok(());
+        };
+
+        publish(
+            &self.events,
+            AgentEvent::ContextCompactionStarted {
+                session_id,
+                task_id,
+            },
+        );
+
+        // All in-loop rounds persist under this task's single turn, so the summary
+        // is recorded as covering the highest already-persisted prior turn only.
+        let prior_max_turn = task_context
+            .history_messages
+            .iter()
+            .map(|history| history.turn_sequence)
+            .max()
+            .unwrap_or(0);
+        let messages_to_compact = task_context.compactable_messages();
+        let compaction = preparer
+            .compact_running_context(
+                task_id,
+                session_id,
+                model,
+                &messages_to_compact,
+                prior_max_turn,
+            )
+            .await?;
+
+        if let Some(compaction) = compaction {
+            task_context.replace_compactable_with_summary(vec![compaction.summary_message]);
+            publish(
+                &self.events,
+                AgentEvent::ContextCompactionFinished {
+                    session_id,
+                    task_id,
+                    compacted_rounds: compaction.outcome.compacted_rounds,
+                    compacted_through_turn: compaction.outcome.compacted_through_turn,
+                    summary_chars: compaction.outcome.summary_chars,
+                },
+            );
+        } else {
+            publish(
+                &self.events,
+                AgentEvent::ContextCompactionCanceled {
+                    session_id,
+                    task_id,
+                },
+            );
+        }
+
+        Ok(())
     }
 
     /// Runs one streaming model request attempt for a round.
@@ -408,6 +506,9 @@ impl AgentTaskRunner {
                 round_content,
                 round_reasoning,
                 tool_results,
+                input_tokens: final_usage
+                    .as_ref()
+                    .map(|usage| i64::from(usage.prompt_tokens)),
             },
         ))
     }
@@ -457,7 +558,7 @@ impl AgentTaskRunner {
                 &tool_call.name,
                 ToolContext {
                     task_id,
-                    workspace_id: self.tool_context.workspace_id.clone(),
+                    workspace_id: self.tool_context.workspace_id,
                     workspace_root: self.tool_context.workspace_root.clone(),
                 },
                 tool_call.arguments.clone(),
@@ -490,7 +591,7 @@ impl AgentTaskRunner {
         }
         let result_content = match result {
             Ok(output) => {
-                let content = serde_json::to_string(&output.content).unwrap_or_default();
+                let content = output.content.to_string();
                 publish(
                     &self.events,
                     tool_finished_event(
@@ -573,7 +674,7 @@ pub(crate) fn build_model_round_messages(
                 "type": "function",
                 "function": {
                     "name": result.tool_call.name,
-                    "arguments": serde_json::to_string(&result.tool_call.arguments).unwrap_or_default()
+                    "arguments": result.tool_call.arguments.to_string()
                 }
             })
         })

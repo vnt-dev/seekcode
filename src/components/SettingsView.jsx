@@ -47,12 +47,7 @@ export function SettingsView({
 
         <form className="settings-form" onSubmit={onSubmit}>
           <section className="settings-panel">
-            <div className="settings-panel-header">
-              <div>
-                <h2>配置</h2>
-                <p>配置 SeekCode 使用的默认模型供应商和额外模型供应商。</p>
-              </div>
-            </div>
+            <div className="settings-panel-header"></div>
 
             <div className="settings-subsection-title">默认模型供应商</div>
 

@@ -79,6 +79,27 @@ impl AgentTaskContext {
         self.history_messages
             .retain(|message| message.turn_sequence > compacted_through_turn);
     }
+
+    /// Returns the compacted summary plus expanded history — the portion of the
+    /// context eligible for in-loop compaction.
+    pub fn compactable_messages(&self) -> Vec<ChatMessage> {
+        let mut messages =
+            Vec::with_capacity(self.compacted_context.len() + self.history_messages.len());
+        messages.extend(self.compacted_context.iter().cloned());
+        messages.extend(
+            self.history_messages
+                .iter()
+                .map(|history| history.message.clone()),
+        );
+        messages
+    }
+
+    /// Folds the compactable portion into a fresh summary: replaces the compacted
+    /// context and clears all expanded history messages.
+    pub fn replace_compactable_with_summary(&mut self, compacted_context: Vec<ChatMessage>) {
+        self.compacted_context = compacted_context;
+        self.history_messages.clear();
+    }
 }
 
 /// A history message with the persisted turn it belongs to.
@@ -116,6 +137,14 @@ pub struct AgentContextCompactionOutcome {
     pub summary_chars: usize,
 }
 
+/// Result of compacting the live message list during the running round loop.
+pub struct RunningContextCompaction {
+    /// Summary message that replaces the folded portion of the running context.
+    pub summary_message: ChatMessage,
+    /// Statistics describing the compaction that was performed.
+    pub outcome: AgentContextCompactionOutcome,
+}
+
 /// Optional application hook that can refresh context after a task has started.
 #[async_trait]
 pub trait AgentContextPreparer: Send + Sync {
@@ -141,4 +170,20 @@ pub trait AgentContextPreparer: Send + Sync {
         current_context: &AgentTaskContext,
         precheck: AgentContextPrecheck,
     ) -> SeekCodeResult<PreparedAgentContext>;
+
+    /// Folds the given running-loop messages into a single summary message.
+    ///
+    /// Called mid-run when the live context grows past the in-loop trigger; the
+    /// returned summary replaces the folded portion of the running message list.
+    /// Returns `Ok(None)` when no summary could be produced.
+    async fn compact_running_context(
+        &self,
+        _task_id: TaskId,
+        _session_id: SessionId,
+        _model: &str,
+        _messages_to_compact: &[ChatMessage],
+        _compacted_through_turn: i64,
+    ) -> SeekCodeResult<Option<RunningContextCompaction>> {
+        Ok(None)
+    }
 }
