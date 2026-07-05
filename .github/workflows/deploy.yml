@@ -30,11 +30,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
-
       - name: Build Windows bundles
-        run: cargo tauri build --bundles nsis,msi
+        run: npm exec tauri build -- --bundles nsis,msi
 
       - name: Collect Windows artifacts
         shell: pwsh
