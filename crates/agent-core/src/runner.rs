@@ -162,10 +162,10 @@ impl AgentTaskRunner {
         // the immutable per-round base comes from `task_context.messages()`.
         let mut appended_messages: Vec<ChatMessage> = Vec::new();
 
-        let in_loop_compaction_threshold = i64::from(
-            self.provider.model_profile(&model).await?.context_window,
-        ) * IN_LOOP_COMPACTION_TRIGGER_PERCENT
-            / 100;
+        let in_loop_compaction_threshold =
+            i64::from(self.provider.model_profile(&model).await?.context_window)
+                * IN_LOOP_COMPACTION_TRIGGER_PERCENT
+                / 100;
         let mut in_loop_compacted = false;
         let mut latest_input_tokens: Option<i64> = None;
 
