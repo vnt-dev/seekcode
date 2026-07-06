@@ -90,6 +90,7 @@ import {
 import { MessageBubble } from "./components/MessageBubble.jsx";
 import { SettingsView } from "./components/SettingsView.jsx";
 import { WorkspacePanel } from "./components/WorkspacePanel.jsx";
+import { CloseBehaviorDialog } from "./components/CloseBehaviorDialog.jsx";
 
 // Base virtual index for the transcript. Virtuoso keeps scroll position stable
 // while prepending older messages by tracking a decreasing firstItemIndex, so we
@@ -133,8 +134,10 @@ export function App() {
     context_window: "1M",
     models: DEFAULT_MODELS,
     providers: [],
+    minimize_to_tray: true,
   });
   const [settingsStatus, setSettingsStatus] = useState("idle");
+  const [closeBehaviorDialogOpen, setCloseBehaviorDialogOpen] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(null);
   const [messages, setMessages] = useState([
     {
@@ -228,8 +231,11 @@ export function App() {
   }, [activeSessionId]);
 
   useEffect(() => {
-    loadSettingsFromDisk({ showStatus: false });
-    refreshWorkspaces();
+    async function init() {
+      await loadSettingsFromDisk({ showStatus: false });
+      await refreshWorkspaces();
+    }
+    init();
   }, []);
 
   useEffect(() => {
@@ -281,6 +287,18 @@ export function App() {
         unlisten = dispose;
       },
     );
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten;
+    listen("app:show-close-behavior-dialog", () => {
+      setCloseBehaviorDialogOpen(true);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
     return () => {
       if (unlisten) unlisten();
     };
@@ -457,6 +475,21 @@ export function App() {
     } catch (error) {
       if (showStatus) setSettingsStatus(`Load failed: ${error}`);
       else setModelError(String(error));
+    }
+  }
+
+  async function handleCloseBehaviorChoice(minimizeToTray) {
+    try {
+      const updated = {
+        ...settings,
+        minimize_to_tray: minimizeToTray,
+        close_behavior_configured: true,
+      };
+      await invoke("save_app_settings", { settings: updated });
+      setSettings(mapLoadedSettings(updated));
+      setCloseBehaviorDialogOpen(false);
+    } catch (error) {
+      setModelError(String(error));
     }
   }
 
@@ -2149,6 +2182,10 @@ export function App() {
             </div>
           </section>
         </div>
+      ) : null}
+
+      {closeBehaviorDialogOpen ? (
+        <CloseBehaviorDialog onChoice={handleCloseBehaviorChoice} />
       ) : null}
     </div>
   );

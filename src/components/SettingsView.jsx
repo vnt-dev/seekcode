@@ -106,6 +106,30 @@ export function SettingsView({
               onChange={(models) => setSettings((current) => ({ ...current, models }))}
             />
 
+            <div className="settings-subsection-title">窗口行为</div>
+
+            <label className="field settings-toggle-row">
+              <span>关闭时退到系统托盘</span>
+              <div className="toggle-row-right">
+                <button
+                  className={`switch-button ${settings.minimize_to_tray ? "is-on" : ""}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.minimize_to_tray}
+                  onClick={() =>
+                    setSettings((current) => ({
+                      ...current,
+                      minimize_to_tray: !current.minimize_to_tray,
+                      close_behavior_configured: true,
+                    }))
+                  }
+                >
+                  <span />
+                </button>
+              </div>
+            </label>
+            <small className="field-hint">开启后，点击关闭按钮时程序将退到系统托盘而非完全退出</small>
+
             <div className="provider-actions">
               <button
                 className="secondary-button"

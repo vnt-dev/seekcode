@@ -27,9 +27,10 @@ reqwest.workspace = true
 rolling-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { workspace = true, features = [] }
+tauri = { workspace = true, features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener.workspace = true
+image = "0.25"
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

@@ -301,3 +301,15 @@
   color: var(--text-secondary);
   font-size: 12px;
 }
+
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  grid-template-columns: 1fr auto;
+}
+
+.toggle-row-right {
+  display: flex;
+  align-items: center;
+}
