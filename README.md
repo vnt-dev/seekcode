@@ -156,6 +156,15 @@ cargo test --workspace
 
 Run both before opening a pull request or shipping a local build.
 
+## Exhibition
+![p1](assets/p1.png)
+![p2](assets/p2.png)
+![p3](assets/p3.png)
+![p4](assets/p4.png)
+![p5](assets/p5.png)
+![p6](assets/p6.png)
+![p7](assets/p7.png)
+
 ## License
 
 SeekCode is licensed under the MIT License. See [LICENSE](LICENSE).
