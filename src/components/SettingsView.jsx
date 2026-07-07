@@ -1,11 +1,15 @@
-// Application settings page: default provider config plus additional providers,
-// each with an editable model collection.
+// Application settings page: general preferences and provider configuration.
 
-import React from "react";
-import { CloudDownload, Loader2, Plus, Save, Settings2, Trash2 } from "lucide-react";
+import React, { useState } from "react";
+import { CloudDownload, Loader2, Plus, Save, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
 
 import { DEFAULT_PROVIDER_ID } from "../constants.js";
 import { normalizeAdditionalProviders, updateProviderAt } from "../lib/models.js";
+
+const SETTINGS_TABS = [
+  { id: "general", label: "常规", icon: SlidersHorizontal },
+  { id: "config", label: "配置", icon: Settings2 },
+];
 
 export function SettingsView({
   settings,
@@ -16,6 +20,7 @@ export function SettingsView({
   onSubmit,
   onBack,
 }) {
+  const [activeTab, setActiveTab] = useState("general");
   const canFetchDefault =
     Boolean(settings.base_url?.trim()) &&
     Boolean(settings.api_key?.trim()) &&
@@ -39,241 +44,280 @@ export function SettingsView({
 
       <div className="settings-layout">
         <nav className="settings-nav">
-          <button className="settings-nav-item is-active" type="button">
-            <Settings2 size={16} />
-            <span>配置</span>
-          </button>
+          {SETTINGS_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              className={`settings-nav-item ${activeTab === tab.id ? "is-active" : ""}`}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <tab.icon size={16} />
+              <span>{tab.label}</span>
+            </button>
+          ))}
         </nav>
 
         <form className="settings-form" onSubmit={onSubmit}>
-          <section className="settings-panel">
-            <div className="settings-panel-header"></div>
-
-            <div className="settings-subsection-title">默认模型供应商</div>
-
-            <label className="field">
-              <span>base_url</span>
-              <input
-                value={settings.base_url}
-                onChange={(event) =>
-                  setSettings((current) => ({ ...current, base_url: event.target.value }))
-                }
-                placeholder="https://api.deepseek.com"
-              />
-            </label>
-
-            <label className="field">
-              <span>api_key</span>
-              <input
-                value={settings.api_key}
-                onChange={(event) =>
-                  setSettings((current) => ({ ...current, api_key: event.target.value }))
-                }
-                placeholder="sk-..."
-                type="password"
-              />
-            </label>
-
-            <label className="field">
-              <span>title_model</span>
-              <input
-                value={settings.title_model}
-                onChange={(event) =>
-                  setSettings((current) => ({ ...current, title_model: event.target.value }))
-                }
-                placeholder="deepseek-v4-flash"
-              />
-            </label>
-
-            <label className="field">
-              <span>模型上下文大小</span>
-              <input
-                value={settings.context_window}
-                onChange={(event) =>
-                  setSettings((current) => ({ ...current, context_window: event.target.value }))
-                }
-                placeholder="1M"
-              />
-              <small className="field-hint">支持 k / M 单位（忽略大小写），例如 1M、500k、64000</small>
-            </label>
-
-            <ModelCollectionEditor
-              title="默认供应商模型集合"
-              models={settings.models}
-              fetching={fetchingModels === DEFAULT_PROVIDER_ID}
-              canFetch={canFetchDefault}
-              onFetch={() => onFetchModels(DEFAULT_PROVIDER_ID)}
-              onChange={(models) => setSettings((current) => ({ ...current, models }))}
+          {activeTab === "general" ? (
+            <GeneralSettings settings={settings} setSettings={setSettings} />
+          ) : (
+            <ConfigSettings
+              settings={settings}
+              setSettings={setSettings}
+              fetchingModels={fetchingModels}
+              canFetchDefault={canFetchDefault}
+              onFetchModels={onFetchModels}
+              providers={providers}
             />
+          )}
 
-            <div className="settings-subsection-title">窗口行为</div>
-
-            <label className="field settings-toggle-row">
-              <span>关闭时退到系统托盘</span>
-              <div className="toggle-row-right">
-                <button
-                  className={`switch-button ${settings.minimize_to_tray ? "is-on" : ""}`}
-                  type="button"
-                  role="switch"
-                  aria-checked={settings.minimize_to_tray}
-                  onClick={() =>
-                    setSettings((current) => ({
-                      ...current,
-                      minimize_to_tray: !current.minimize_to_tray,
-                      close_behavior_configured: true,
-                    }))
-                  }
-                >
-                  <span />
-                </button>
-              </div>
-            </label>
-            <small className="field-hint">开启后，点击关闭按钮时程序将退到系统托盘而非完全退出</small>
-
-            <div className="provider-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() =>
-                  setSettings((current) => ({
-                    ...current,
-                    providers: [
-                      ...normalizeAdditionalProviders(current.providers),
-                      {
-                        id: "",
-                        name: "",
-                        base_url: "",
-                        api_key: "",
-                        models: [{ id: "", label: "" }],
-                      },
-                    ],
-                  }))
-                }
-              >
-                <Plus size={15} />
-                <span>添加供应商</span>
-              </button>
-            </div>
-
-            {providers.length > 0 ? (
-              <div className="providers-field">
-                <div className="models-field-header">
-                  <span>其他模型供应商</span>
-                </div>
-              <div className="provider-config-list">
-                {providers.map((provider, providerIndex) => {
-                  const canFetchProvider =
-                    Boolean(provider.id?.trim()) &&
-                    Boolean(provider.base_url?.trim()) &&
-                    Boolean(provider.api_key?.trim()) &&
-                    !fetchingModels;
-                  return (
-                    <div className="provider-config" key={providerIndex}>
-                      <div className="provider-config-header">
-                        <strong>{provider.name || provider.id || "新供应商"}</strong>
-                        <button
-                          className="model-remove-button"
-                          type="button"
-                          title="移除供应商"
-                          onClick={() =>
-                            setSettings((current) => ({
-                              ...current,
-                              providers: normalizeAdditionalProviders(current.providers).filter(
-                                (_, index) => index !== providerIndex,
-                              ),
-                            }))
-                          }
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
-                      <div className="provider-grid">
-                        <label className="field">
-                          <span>供应商 ID</span>
-                          <input
-                            value={provider.id}
-                            onChange={(event) =>
-                              setSettings((current) =>
-                                updateProviderAt(current, providerIndex, { id: event.target.value }),
-                              )
-                            }
-                            placeholder="openai"
-                          />
-                        </label>
-                        <label className="field">
-                          <span>供应商名称</span>
-                          <input
-                            value={provider.name}
-                            onChange={(event) =>
-                              setSettings((current) =>
-                                updateProviderAt(current, providerIndex, { name: event.target.value }),
-                              )
-                            }
-                            placeholder="OpenAI"
-                          />
-                        </label>
-                        <label className="field">
-                          <span>base_url</span>
-                          <input
-                            value={provider.base_url}
-                            onChange={(event) =>
-                              setSettings((current) =>
-                                updateProviderAt(current, providerIndex, {
-                                  base_url: event.target.value,
-                                }),
-                              )
-                            }
-                            placeholder="https://api.openai.com/v1"
-                          />
-                        </label>
-                        <label className="field">
-                          <span>api_key</span>
-                          <input
-                            value={provider.api_key}
-                            onChange={(event) =>
-                              setSettings((current) =>
-                                updateProviderAt(current, providerIndex, {
-                                  api_key: event.target.value,
-                                }),
-                              )
-                            }
-                            placeholder="sk-..."
-                            type="password"
-                          />
-                        </label>
-                      </div>
-                      <ModelCollectionEditor
-                        title="模型集合"
-                        models={provider.models}
-                        fetching={fetchingModels === provider.id}
-                        canFetch={canFetchProvider}
-                        onFetch={() => onFetchModels(provider.id)}
-                        onChange={(models) =>
-                          setSettings((current) =>
-                            updateProviderAt(current, providerIndex, { models }),
-                          )
-                        }
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-              </div>
+          <div className="settings-actions">
+            {settingsStatus !== "idle" ? (
+              <span className="settings-status">{settingsStatus}</span>
             ) : null}
-
-            <div className="settings-actions">
-              {settingsStatus !== "idle" ? (
-                <span className="settings-status">{settingsStatus}</span>
-              ) : null}
-              <button className="save-button" type="submit">
-                <Save size={16} />
-                <span>保存</span>
-              </button>
-            </div>
-          </section>
+            <button className="save-button" type="submit">
+              <Save size={16} />
+              <span>保存</span>
+            </button>
+          </div>
         </form>
       </div>
     </main>
+  );
+}
+
+function GeneralSettings({ settings, setSettings }) {
+  return (
+    <section className="settings-panel">
+      <div className="settings-panel-header"></div>
+
+      <div className="settings-subsection-title">窗口行为</div>
+
+      <label className="field settings-toggle-row">
+        <span>关闭时退到系统托盘</span>
+        <div className="toggle-row-right">
+          <button
+            className={`switch-button ${settings.minimize_to_tray ? "is-on" : ""}`}
+            type="button"
+            role="switch"
+            aria-checked={settings.minimize_to_tray}
+            onClick={() =>
+              setSettings((current) => ({
+                ...current,
+                minimize_to_tray: !current.minimize_to_tray,
+                close_behavior_configured: true,
+              }))
+            }
+          >
+            <span />
+          </button>
+        </div>
+      </label>
+      <small className="field-hint">开启后，点击关闭按钮时程序将退到系统托盘而非完全退出</small>
+    </section>
+  );
+}
+
+function ConfigSettings({
+  settings,
+  setSettings,
+  fetchingModels,
+  canFetchDefault,
+  onFetchModels,
+  providers,
+}) {
+  return (
+    <section className="settings-panel">
+      <div className="settings-panel-header"></div>
+
+      <div className="settings-subsection-title">默认模型供应商</div>
+
+      <label className="field">
+        <span>base_url</span>
+        <input
+          value={settings.base_url}
+          onChange={(event) =>
+            setSettings((current) => ({ ...current, base_url: event.target.value }))
+          }
+          placeholder="https://api.deepseek.com"
+        />
+      </label>
+
+      <label className="field">
+        <span>api_key</span>
+        <input
+          value={settings.api_key}
+          onChange={(event) =>
+            setSettings((current) => ({ ...current, api_key: event.target.value }))
+          }
+          placeholder="sk-..."
+          type="password"
+        />
+      </label>
+
+      <label className="field">
+        <span>title_model</span>
+        <input
+          value={settings.title_model}
+          onChange={(event) =>
+            setSettings((current) => ({ ...current, title_model: event.target.value }))
+          }
+          placeholder="deepseek-v4-flash"
+        />
+      </label>
+
+      <label className="field">
+        <span>模型上下文大小</span>
+        <input
+          value={settings.context_window}
+          onChange={(event) =>
+            setSettings((current) => ({ ...current, context_window: event.target.value }))
+          }
+          placeholder="1M"
+        />
+        <small className="field-hint">支持 k / M 单位（忽略大小写），例如 1M、500k、64000</small>
+      </label>
+
+      <ModelCollectionEditor
+        title="默认供应商模型集合"
+        models={settings.models}
+        fetching={fetchingModels === DEFAULT_PROVIDER_ID}
+        canFetch={canFetchDefault}
+        onFetch={() => onFetchModels(DEFAULT_PROVIDER_ID)}
+        onChange={(models) => setSettings((current) => ({ ...current, models }))}
+      />
+
+      <div className="provider-actions">
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() =>
+            setSettings((current) => ({
+              ...current,
+              providers: [
+                ...normalizeAdditionalProviders(current.providers),
+                {
+                  id: "",
+                  name: "",
+                  base_url: "",
+                  api_key: "",
+                  models: [{ id: "", label: "" }],
+                },
+              ],
+            }))
+          }
+        >
+          <Plus size={15} />
+          <span>添加供应商</span>
+        </button>
+      </div>
+
+      {providers.length > 0 ? (
+        <div className="providers-field">
+          <div className="models-field-header">
+            <span>其他模型供应商</span>
+          </div>
+        <div className="provider-config-list">
+          {providers.map((provider, providerIndex) => {
+            const canFetchProvider =
+              Boolean(provider.id?.trim()) &&
+              Boolean(provider.base_url?.trim()) &&
+              Boolean(provider.api_key?.trim()) &&
+              !fetchingModels;
+            return (
+              <div className="provider-config" key={providerIndex}>
+                <div className="provider-config-header">
+                  <strong>{provider.name || provider.id || "新供应商"}</strong>
+                  <button
+                    className="model-remove-button"
+                    type="button"
+                    title="移除供应商"
+                    onClick={() =>
+                      setSettings((current) => ({
+                        ...current,
+                        providers: normalizeAdditionalProviders(current.providers).filter(
+                          (_, index) => index !== providerIndex,
+                        ),
+                      }))
+                    }
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                <div className="provider-grid">
+                  <label className="field">
+                    <span>供应商 ID</span>
+                    <input
+                      value={provider.id}
+                      onChange={(event) =>
+                        setSettings((current) =>
+                          updateProviderAt(current, providerIndex, { id: event.target.value }),
+                        )
+                      }
+                      placeholder="openai"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>供应商名称</span>
+                    <input
+                      value={provider.name}
+                      onChange={(event) =>
+                        setSettings((current) =>
+                          updateProviderAt(current, providerIndex, { name: event.target.value }),
+                        )
+                      }
+                      placeholder="OpenAI"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>base_url</span>
+                    <input
+                      value={provider.base_url}
+                      onChange={(event) =>
+                        setSettings((current) =>
+                          updateProviderAt(current, providerIndex, {
+                            base_url: event.target.value,
+                          }),
+                        )
+                      }
+                      placeholder="https://api.openai.com/v1"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>api_key</span>
+                    <input
+                      value={provider.api_key}
+                      onChange={(event) =>
+                        setSettings((current) =>
+                          updateProviderAt(current, providerIndex, {
+                            api_key: event.target.value,
+                          }),
+                        )
+                      }
+                      placeholder="sk-..."
+                      type="password"
+                    />
+                  </label>
+                </div>
+                <ModelCollectionEditor
+                  title="模型集合"
+                  models={provider.models}
+                  fetching={fetchingModels === provider.id}
+                  canFetch={canFetchProvider}
+                  onFetch={() => onFetchModels(provider.id)}
+                  onChange={(models) =>
+                    setSettings((current) =>
+                      updateProviderAt(current, providerIndex, { models }),
+                    )
+                  }
+                />
+              </div>
+            );
+          })}
+        </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

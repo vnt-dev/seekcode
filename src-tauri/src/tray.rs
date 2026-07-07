@@ -1,12 +1,18 @@
 //! System tray and window close behavior management.
 
 use crate::config;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
     App, Emitter, Manager, Window, WindowEvent,
 };
+
+/// Cached close behavior: whether the user has configured the close action.
+static CLOSE_BEHAVIOR_CONFIGURED: AtomicBool = AtomicBool::new(false);
+/// Cached close behavior: whether to minimize to tray on close.
+static MINIMIZE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 
 /// Loads the tray icon from the embedded 128x128 PNG.
 fn load_tray_icon() -> Image<'static> {
@@ -16,6 +22,30 @@ fn load_tray_icon() -> Image<'static> {
     let width = rgba.width();
     let height = rgba.height();
     Image::new_owned(rgba.into_raw(), width, height)
+}
+
+/// Initializes cached close behavior from disk settings.
+/// Called once during app setup.
+pub fn init_close_behavior_cache() {
+    match config::load_app_settings_sync() {
+        Ok(settings) => {
+            CLOSE_BEHAVIOR_CONFIGURED.store(settings.close_behavior_configured, Ordering::Relaxed);
+            MINIMIZE_TO_TRAY.store(settings.minimize_to_tray, Ordering::Relaxed);
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "seekcode::tray",
+                %error,
+                "failed to load close behavior settings on startup"
+            );
+        }
+    }
+}
+
+/// Updates the cached close behavior values (called after settings save).
+pub fn update_close_behavior_cache(minimize_to_tray: bool) {
+    CLOSE_BEHAVIOR_CONFIGURED.store(true, Ordering::Relaxed);
+    MINIMIZE_TO_TRAY.store(minimize_to_tray, Ordering::Relaxed);
 }
 
 /// Tray menu item IDs.
@@ -65,7 +95,7 @@ pub fn create_system_tray(app: &App) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Handles window close events based on user preference.
+/// Handles window close events based on cached user preference.
 ///
 /// If close behavior hasn't been configured yet, prevents the close and emits
 /// an event to the frontend to show the configuration dialog.
@@ -74,38 +104,24 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
         return;
     }
 
-    // Only handle the main window
     if window.label() != "main" {
         return;
     }
 
-    match config::load_app_settings_sync() {
-        Ok(settings) => {
-            if !settings.close_behavior_configured {
-                // First time: prevent close and ask frontend to show dialog
-                let api_ref = match event {
-                    WindowEvent::CloseRequested { api, .. } => api,
-                    _ => unreachable!(),
-                };
-                api_ref.prevent_close();
-                let _ = window.emit("app:show-close-behavior-dialog", ());
-            } else if settings.minimize_to_tray {
-                // User chose to minimize to tray: hide instead of closing
-                let api_ref = match event {
-                    WindowEvent::CloseRequested { api, .. } => api,
-                    _ => unreachable!(),
-                };
-                api_ref.prevent_close();
-                let _ = window.hide();
-            }
-            // If minimize_to_tray is false, let the default close behavior proceed
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "seekcode::tray",
-                %error,
-                "failed to load settings for close behavior"
-            );
-        }
+    if !CLOSE_BEHAVIOR_CONFIGURED.load(Ordering::Relaxed) {
+        // First time: prevent close and ask frontend to show dialog
+        let api_ref = match event {
+            WindowEvent::CloseRequested { api, .. } => api,
+            _ => unreachable!(),
+        };
+        api_ref.prevent_close();
+        let _ = window.emit("app:show-close-behavior-dialog", ());
+    } else if MINIMIZE_TO_TRAY.load(Ordering::Relaxed) {
+        let api_ref = match event {
+            WindowEvent::CloseRequested { api, .. } => api,
+            _ => unreachable!(),
+        };
+        api_ref.prevent_close();
+        let _ = window.hide();
     }
 }

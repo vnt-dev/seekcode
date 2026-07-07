@@ -26,6 +26,7 @@ fn try_run() -> Result<()> {
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .setup(|app| {
+            tray::init_close_behavior_cache();
             tray::create_system_tray(app)?;
             Ok(())
         })

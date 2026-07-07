@@ -333,6 +333,8 @@ pub async fn save_app_settings(
         .await
         .map_err(|error| error.to_string())?;
 
+    crate::tray::update_close_behavior_cache(settings.minimize_to_tray);
+
     let mut kernel_config = state.kernel.config();
     kernel_config.deepseek.context_window =
         config::parse_context_window(&settings.context_window).unwrap_or(DEFAULT_CONTEXT_WINDOW);
