@@ -16,6 +16,8 @@ export function mapLoadedSettings(settings) {
     context_window: settings?.context_window ?? "1M",
     models: normalizeModelOptions(settings?.models),
     providers: normalizeAdditionalProviders(settings?.providers),
+    minimize_to_tray: settings?.minimize_to_tray ?? true,
+    close_behavior_configured: settings?.close_behavior_configured ?? false,
   };
 }
 

@@ -24,6 +24,10 @@ pub struct AppSettings {
     pub models: Vec<ModelSetting>,
     /// Additional DeepSeek/OpenAI-compatible model providers.
     pub providers: Vec<ModelProviderSetting>,
+    /// Whether to minimize to system tray on close instead of quitting.
+    pub minimize_to_tray: bool,
+    /// Whether the close behavior has been configured by the user.
+    pub close_behavior_configured: bool,
 }
 
 /// Default context window expression used when none is configured.
@@ -64,6 +68,8 @@ impl Default for AppSettings {
             context_window: DEFAULT_CONTEXT_WINDOW_TEXT.to_string(),
             models: default_models(),
             providers: Vec::new(),
+            minimize_to_tray: true,
+            close_behavior_configured: false,
         }
     }
 }

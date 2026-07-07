@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod state;
+mod tray;
 
 use anyhow::{anyhow, Context, Result};
 use rolling_file::{BasicRollingFileAppender, RollingConditionBasic};
@@ -24,6 +25,14 @@ fn try_run() -> Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
+        .setup(|app| {
+            tray::init_close_behavior_cache();
+            tray::create_system_tray(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            tray::handle_window_event(window, event);
+        })
         .invoke_handler(tauri::generate_handler![
             commands::start_agent_task,
             commands::cancel_agent_task,
